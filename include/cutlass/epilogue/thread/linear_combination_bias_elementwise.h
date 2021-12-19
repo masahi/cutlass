@@ -55,7 +55,9 @@ template <
   typename ElementT_,
   int ElementsPerAccess,
   typename ElementwiseOp_ = Identity<ElementCompute_>,
-  typename BinaryOp_ = plus<ElementCompute_>
+  typename BinaryOp_ = plus<ElementCompute_>,
+  typename ElementwiseBeforeBinaryOp_ = Identity<ElementCompute_>,
+  bool AddBroadcastFirst = false
 >
 class LinearCombinationBiasElementwise {
 public:
@@ -68,9 +70,11 @@ public:
   using ElementT = ElementT_;
   static int const kElementsPerAccess = ElementsPerAccess;
   static int const kCount = kElementsPerAccess;
+  static bool const kAddBroadcastFirst = AddBroadcastFirst;
 
   using ElementwiseOp = ElementwiseOp_;
   using BinaryOp = BinaryOp_;
+  using ElementwiseBeforeBinaryOp = ElementwiseBeforeBinaryOp_;
 
   using FragmentAccumulator = Array<ElementAccumulator, kElementsPerAccess>;
   using FragmentCompute = Array<ElementCompute, kElementsPerAccess>;
@@ -101,10 +105,10 @@ public:
     //
 
     CUTLASS_HOST_DEVICE
-    Params(): 
-      alpha(ElementCompute(1)), 
-      beta(ElementCompute(0)), 
-      alpha_ptr(nullptr), 
+    Params():
+      alpha(ElementCompute(1)),
+      beta(ElementCompute(0)),
+      alpha_ptr(nullptr),
       beta_ptr(nullptr) { }
 
     CUTLASS_HOST_DEVICE
@@ -184,14 +188,15 @@ public:
   /// Applies the operation when is_source_needed() is true
   CUTLASS_HOST_DEVICE
   void operator()(
-    FragmentZ &frag_Z, 
-    FragmentT &frag_T, 
+    FragmentZ &frag_Z,
+    FragmentT &frag_T,
     FragmentAccumulator const &AB,
     FragmentC const &frag_C,
     FragmentCompute const &V) const {
 
     ElementwiseOp elementwise_op;
     BinaryOp binary_op;
+    ElementwiseBeforeBinaryOp elementwise_before_binary_op;
 
     FragmentCompute tmp_Accum = NumericArrayConverter<ElementCompute, ElementAccumulator, kElementsPerAccess>()(AB);
     FragmentCompute tmp_C = NumericArrayConverter<ElementCompute, ElementC, kElementsPerAccess>()(frag_C);
@@ -200,7 +205,14 @@ public:
 
     CUTLASS_PRAGMA_UNROLL
     for (int i = 0; i < kElementsPerAccess; ++i) {
-      ElementCompute z = binary_op(alpha_ * tmp_Accum[i] + beta_ * tmp_C[i], V[i]);
+      ElementCompute z =
+          kAddBroadcastFirst
+              ? binary_op(
+                    elementwise_before_binary_op(alpha_ * tmp_Accum[i] + V[i]),
+                    beta_ * tmp_C[i])
+              : binary_op(elementwise_before_binary_op(alpha_ * tmp_Accum[i] +
+                                                       beta_ * tmp_C[i]),
+                          V[i]);
       result_T[i] = z;
       result_Z[i] = skip_elementwise_ ? z : elementwise_op(z);
     }
@@ -215,8 +227,8 @@ public:
   /// Applies the operation when is_source_needed() is false
   CUTLASS_HOST_DEVICE
   void operator()(
-    FragmentZ &frag_Z, 
-    FragmentT &frag_T, 
+    FragmentZ &frag_Z,
+    FragmentT &frag_T,
     FragmentAccumulator const &AB,
     FragmentCompute const &V) const {
 
