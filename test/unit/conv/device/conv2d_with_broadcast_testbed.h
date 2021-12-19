@@ -70,11 +70,12 @@ struct Conv2dWithBroadcastReferenceOp {
 
   typename OutputOp::BinaryOp binary_op;
   typename OutputOp::ElementwiseOp elementwise_op;
+  typename OutputOp::ElementwiseBeforeBinaryOp elementwise_before_binary_op;
 
   Conv2dWithBroadcastReferenceOp() { }
 
   void operator()(ElementZ &Z, ElementT &T, ElementCompute conv2d, ElementCompute bias) {
-    ElementCompute t_full = binary_op(conv2d, bias);
+    ElementCompute t_full = binary_op(elementwise_before_binary_op(conv2d), bias);
     T = ElementT(t_full);
 
     ElementCompute z_full = elementwise_op(t_full);
@@ -113,6 +114,7 @@ public:
   using ElementT = typename EpilogueOutputOp::ElementT;
 
   static cutlass::conv::Operator const kConvolutionalOperator = Conv2d::kConvolutionalOperator;
+  static const bool kAddBroadcastFirst = EpilogueOutputOp::kAddBroadcastFirst;
 
 public:
 
@@ -148,7 +150,7 @@ public:
     /// Helper to initialize a tensor view
   template <typename Element, typename Layout>
   void initialize_tensor(
-    cutlass::TensorView<Element, Layout> view, 
+    cutlass::TensorView<Element, Layout> view,
     cutlass::Distribution::Kind dist_kind,
     uint64_t seed) {
 
@@ -171,14 +173,14 @@ public:
       else {
         scope = 8;
       }
-      
+
       cutlass::reference::host::TensorFillRandomUniform(
         view, seed, scope, -scope, 0);
-    } 
+    }
     else if (dist_kind == cutlass::Distribution::Identity) {
 
       cutlass::reference::host::TensorFillIdentity(view);
-    } 
+    }
     else if (dist_kind == cutlass::Distribution::Gaussian) {
 
       cutlass::reference::host::TensorFillRandomGaussian(view, seed, 0, 0.5);
@@ -186,14 +188,14 @@ public:
     else if (dist_kind == cutlass::Distribution::Sequential) {
 
       cutlass::reference::host::BlockFillSequential(view.data(), view.capacity());
-    } 
+    }
     else {
     }
   }
 
   void initialize(
     cutlass::conv::Conv2dProblemSize const &problem_size, uint64_t seed = 2019) {
-        
+
     tensor_A.resize(implicit_gemm_tensor_a_extent(kConvolutionalOperator, problem_size));
     tensor_B.resize(implicit_gemm_tensor_b_extent(kConvolutionalOperator, problem_size));
     tensor_C.resize(implicit_gemm_tensor_c_extent(kConvolutionalOperator, problem_size));
@@ -210,11 +212,11 @@ public:
       implicit_gemm_tensor_c_extent(kConvolutionalOperator, problem_size).c(),
     });
 
-    initialize_tensor(tensor_A.host_view(), init_A, seed); 
-    initialize_tensor(tensor_B.host_view(), init_B, seed * 17); 
+    initialize_tensor(tensor_A.host_view(), init_A, seed);
+    initialize_tensor(tensor_B.host_view(), init_B, seed * 17);
     initialize_tensor(tensor_C.host_view(), init_C, seed * 39);
     initialize_tensor(tensor_Broadcast.host_view(), init_C, seed * 39);
- 
+
     for (int n = 0; n < tensor_C_reference.extent().n(); ++n) {
       for (int p = 0; p < tensor_C_reference.extent().h(); ++p) {
         for (int q = 0; q < tensor_C_reference.extent().w(); ++q) {
@@ -224,7 +226,7 @@ public:
         }
       }
     }
-   
+
     tensor_A.sync_device();
     tensor_B.sync_device();
     tensor_C.sync_device();
@@ -270,7 +272,7 @@ public:
     cutlass::conv::Conv2dProblemSize const &problem_size,
     cutlass::conv::SplitKMode const &split_k_mode = cutlass::conv::SplitKMode::kSerial,
     ElementCompute alpha = ElementCompute(1),
-    ElementCompute beta = ElementCompute(0)) {
+    ElementCompute beta = ElementCompute(1)) {
 
     // Waive test if insufficient CUDA device
     if (!sufficient()) {
@@ -305,7 +307,7 @@ public:
       implicit_gemm_tensor_c_extent(kConvolutionalOperator, problem_size).c()
     );
 
-    // initialize the kernel 
+    // initialize the kernel
     size_t workspace_size = Conv2d::get_workspace_size(conv2d_args);
 
     cutlass::device_memory::allocation<uint8_t> workspace(workspace_size);
@@ -320,7 +322,7 @@ public:
 
     // run conv2d operator
     status = conv2d_op();
-    
+
     EXPECT_TRUE(status == cutlass::Status::kSuccess);
     if (status != cutlass::Status::kSuccess) {
       return false;
@@ -329,7 +331,7 @@ public:
     bool passed = false;
 
     cudaError_t result = cudaDeviceSynchronize();
-    EXPECT_EQ(result, cudaSuccess) << " device reference error: " 
+    EXPECT_EQ(result, cudaSuccess) << " device reference error: "
                                    << cudaGetErrorString(result);
 
     tensor_T_computed.sync_host();
@@ -338,6 +340,9 @@ public:
     //
     // Reference check
     //
+
+    // When add_broadcast_first is true, add bias on the host
+    ElementCompute beta_ref = kAddBroadcastFirst ? 0 : beta;
 
 #if CUTLASS_CONV_TEST_UNIT_REFERENCE_DEVICE_ENABLED
 
@@ -349,7 +354,7 @@ public:
       ElementAccumulator,
       LayoutC,
       ElementAccumulator,
-      ElementAccumulator 
+      ElementAccumulator
     >(
       kConvolutionalOperator,
       problem_size,
@@ -357,13 +362,13 @@ public:
       tensor_B.device_ref(),
       tensor_C_reference.device_ref(),
       tensor_Y_reference.device_ref(),
-      alpha, 
-      beta);
+      alpha,
+      beta_ref);
 
     // sync host (copy device data to host) for dumping error output in case of mismatches
     tensor_Y_reference.sync_host();
-    
-#else 
+
+#else
 
     cutlass::reference::host::Conv2d<
       ElementA,
@@ -381,8 +386,8 @@ public:
       tensor_B.host_ref(),
       tensor_C_reference.host_ref(),
       tensor_Y_reference.host_ref(),
-      alpha, 
-      beta);
+      alpha,
+      beta_ref);
 
 #endif
     ReferenceOp reference_op;
@@ -392,12 +397,20 @@ public:
       for (int p = 0; p < problem_size.P; ++p) {
         for (int q = 0; q < problem_size.Q; ++q) {
           for (int k = 0; k < problem_size.K; ++k) {
-  
+
             ElementZ z;
             ElementT t;
-    
-            reference_op(z, t, tensor_Y_reference.at({n, p, q, k}), tensor_Broadcast.at({0, 0, 0, k}));
-    
+
+            if (kAddBroadcastFirst) {
+              reference_op(z, t,
+                           tensor_Y_reference.at({n, p, q, k}) +
+                               tensor_Broadcast.at({0, 0, 0, k}),
+                           tensor_C_reference.at({n, p, q, k}));
+            } else {
+              reference_op(z, t, tensor_Y_reference.at({n, p, q, k}),
+                           tensor_Broadcast.at({0, 0, 0, k}));
+            }
+
             tensor_Z_reference.at({n, p, q, k}) = z;
             tensor_T_reference.at({n, p, q, k}) = t;
           }
@@ -406,13 +419,13 @@ public:
     }
 
     passed = cutlass::reference::host::TensorEquals(
-      tensor_T_computed.host_view(), 
+      tensor_T_computed.host_view(),
       tensor_T_reference.host_view());
 
     EXPECT_TRUE(passed);
 
     passed = cutlass::reference::host::TensorEquals(
-      tensor_Z_computed.host_view(), 
+      tensor_Z_computed.host_view(),
       tensor_Z_reference.host_view());
 
     EXPECT_TRUE(passed);
@@ -423,32 +436,32 @@ public:
       fname << "error_Conv2d_ImplicitGemm_device_"
         << (split_k_mode == cutlass::conv::SplitKMode::kSerial ? "serial_reduction_" : "parallel_reduction_")
         << (Conv2d::kConvolutionalOperator == cutlass::conv::Operator::kFprop ? "fprop_" :
-            (Conv2d::kConvolutionalOperator == cutlass::conv::Operator::kDgrad ? "dgrad_" : "wgrad_")) 
+            (Conv2d::kConvolutionalOperator == cutlass::conv::Operator::kDgrad ? "dgrad_" : "wgrad_"))
         << "nhwc_"
         << problem_size.N << "x"
         << problem_size.H << "x"
         << problem_size.W << "x"
-        << problem_size.C 
+        << problem_size.C
         << "_krsc_"
         << problem_size.K << "x"
         << problem_size.R << "x"
         << problem_size.S << "x"
-        << problem_size.C 
-        << "_padding_" 
+        << problem_size.C
+        << "_padding_"
         << problem_size.pad_h << "x"
-        << problem_size.pad_w 
-        << "_stride_"  
+        << problem_size.pad_w
+        << "_stride_"
         << problem_size.stride_h << "x"
-        << problem_size.stride_w 
+        << problem_size.stride_w
         << "_dilation_"
         << problem_size.dilation_h << "x"
         << problem_size.dilation_w << "_"
         << (problem_size.mode == cutlass::conv::Mode::kCrossCorrelation ? "xcorr_" : "conv_")
-        << Conv2d::ThreadblockShape::kM << "x"  
-        << Conv2d::ThreadblockShape::kN << "x"  
+        << Conv2d::ThreadblockShape::kM << "x"
+        << Conv2d::ThreadblockShape::kN << "x"
         << Conv2d::ThreadblockShape::kK << "_"
-        << Conv2d::WarpShape::kM << "x"  
-        << Conv2d::WarpShape::kN << "x"  
+        << Conv2d::WarpShape::kM << "x"
+        << Conv2d::WarpShape::kN << "x"
         << Conv2d::WarpShape::kK << ".txt";
 
       std::cout << fname.str() << std::endl;
@@ -476,7 +489,7 @@ public:
 /////////////////////////////////////////////////////////////////////////////////////////////////////////
 // TestAllConv: Runs cutlass::conv::device::ImplicitGemmConvolution operator and compares it with reference
 // TestAllConv runs conv operator on default conv problem sizes from test::conv::device::TestbedConv2dProblemSizes
-// Additionaly, each conv2d test can provide conv problem sizes (conv_test_sizes) and blacklist of sizes 
+// Additionaly, each conv2d test can provide conv problem sizes (conv_test_sizes) and blacklist of sizes
 // (conv_blacklist_sizes)
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////
 template <typename ImplicitGemm>
@@ -493,7 +506,7 @@ bool TestAllConv2dWithBroadcast(
   TestbedConv2dWithBroadcast<ImplicitGemm> testbed;
 
   //
-  // Get conv problem sizes to run conv operator 
+  // Get conv problem sizes to run conv operator
   //
   TestbedConv2dProblemSizes conv_problems(128/cutlass::sizeof_bits<typename ImplicitGemm::ElementA>::value);
 
@@ -504,7 +517,7 @@ bool TestAllConv2dWithBroadcast(
     &conv_test_sizes,                               // run user specified sizes
     &conv_problems.conv2d_default_sizes,            // run default and cudnn bug sizes
     &conv_problems.conv2d_resnet50_sizes,           // run resnet50 sizes
-#if CUTLASS_CONV_UNIT_TEST_RIGOROUS_SIZE_ENABLED 
+#if CUTLASS_CONV_UNIT_TEST_RIGOROUS_SIZE_ENABLED
     &conv_problems.conv2d_rigorous_sizes,           // run large and rigorous sizes if enabled
 #endif
   };
@@ -524,11 +537,11 @@ bool TestAllConv2dWithBroadcast(
       //
       // Procedurally disable certain cases
       //
-  
-      // CUTLASS DGRAD's *unity* stride specialization only support stride {1, 1} 
-      if ((ImplicitGemm::kConvolutionalOperator == 
-            cutlass::conv::Operator::kDgrad) && 
-          (ImplicitGemm::ImplicitGemmKernel::Mma::IteratorA::kStrideSupport == 
+
+      // CUTLASS DGRAD's *unity* stride specialization only support stride {1, 1}
+      if ((ImplicitGemm::kConvolutionalOperator ==
+            cutlass::conv::Operator::kDgrad) &&
+          (ImplicitGemm::ImplicitGemmKernel::Mma::IteratorA::kStrideSupport ==
             cutlass::conv::StrideSupport::kUnity)) {
         if (!((conv_problem.stride_h == 1) && (conv_problem.stride_w == 1))) {
           continue;
@@ -536,17 +549,17 @@ bool TestAllConv2dWithBroadcast(
       }
 
 #if 0 // relax restrictions on analytic strided dgrad
-      // CUTLASS DGRAD's *strided* specialization only support stride >= {2, 2} 
-      if ((ImplicitGemm::kConvolutionalOperator == 
-            cutlass::conv::Operator::kDgrad) && 
-          (ImplicitGemm::ImplicitGemmKernel::Mma::IteratorA::kStrideSupport == 
+      // CUTLASS DGRAD's *strided* specialization only support stride >= {2, 2}
+      if ((ImplicitGemm::kConvolutionalOperator ==
+            cutlass::conv::Operator::kDgrad) &&
+          (ImplicitGemm::ImplicitGemmKernel::Mma::IteratorA::kStrideSupport ==
             cutlass::conv::StrideSupport::kStrided)) {
          if (((conv_problem.stride_h == 1) && (conv_problem.stride_w == 1))) {
            continue;
          }
       }
 #endif
-      
+
       //
       // Test
       //
@@ -557,26 +570,26 @@ bool TestAllConv2dWithBroadcast(
       passed = testbed.run(
         conv_problem,
         cutlass::conv::SplitKMode::kSerial);
-    
+
       if (!passed) {
         return false;
       }
-      
+
       // test mode = convolution
       passed = testbed.run(
         conv_problem.reset_mode(cutlass::conv::Mode::kConvolution),
         cutlass::conv::SplitKMode::kSerial);
-    
+
       if (!passed) {
         return false;
       }
     }
   }
 
-  // CUTLASS DGRAD's *strided* specialization does not support split-k mode 
-  if ((ImplicitGemm::kConvolutionalOperator == 
-          cutlass::conv::Operator::kDgrad) && 
-      (ImplicitGemm::ImplicitGemmKernel::Mma::IteratorA::kStrideSupport == 
+  // CUTLASS DGRAD's *strided* specialization does not support split-k mode
+  if ((ImplicitGemm::kConvolutionalOperator ==
+          cutlass::conv::Operator::kDgrad) &&
+      (ImplicitGemm::ImplicitGemmKernel::Mma::IteratorA::kStrideSupport ==
         cutlass::conv::StrideSupport::kStrided)) {
 
     passed = testbed.run(
@@ -587,7 +600,7 @@ bool TestAllConv2dWithBroadcast(
       {2, 2},           // stride (stride_h, stride_w)
       {1, 1}),          // dilation (dilation_h, dilation_w)
       cutlass::conv::SplitKMode::kSerial,
-      cutlass::from_real<typename ImplicitGemm::ElementCompute>(2.0), 
+      cutlass::from_real<typename ImplicitGemm::ElementCompute>(2.0),
       cutlass::from_real<typename ImplicitGemm::ElementCompute>(2.0));
 
     if (!passed) {
@@ -597,9 +610,9 @@ bool TestAllConv2dWithBroadcast(
     return passed;
   }
 
-  // Sweep split-k-slice using serial and prallel reduction with non-unity alpha and non-zero beta for 
-  // a single conv2d problem size. Convolution unit tests take a long time to run so only sweep parameters 
-  // which are abolutely neccessary to catch functional bugs. The below code does provide option to sweep 
+  // Sweep split-k-slice using serial and prallel reduction with non-unity alpha and non-zero beta for
+  // a single conv2d problem size. Convolution unit tests take a long time to run so only sweep parameters
+  // which are abolutely neccessary to catch functional bugs. The below code does provide option to sweep
   // alpha and beta for local testing, but only runs one value for alpha and beta.
   cutlass::conv::Conv2dProblemSize conv2d_split_k_test_size (
       {1, 17, 11, 288},   // input size (NHWC)
@@ -633,7 +646,7 @@ bool TestAllConv2dWithBroadcast(
           passed = testbed.run(
             conv2d_split_k_test_size.reset_split_k_slices(split_k_slice),
             split_k_mode,
-            cutlass::from_real<typename ImplicitGemm::ElementCompute>(alpha), 
+            cutlass::from_real<typename ImplicitGemm::ElementCompute>(alpha),
             cutlass::from_real<typename ImplicitGemm::ElementCompute>(beta));
 
           if (!passed) {
