@@ -36,7 +36,7 @@
 #include "cutlass/conv/device/implicit_gemm_convolution.h"
 
 #include "conv2d_with_broadcast_testbed.h"
-        
+
 #if defined(CUTLASS_ARCH_MMA_SM75_SUPPORTED)
 
 TEST(SM75_Device_Conv2d_Fprop_With_Broadcast_Analytic_ImplicitGemm_f16nhwc_f16nhwc_f32nhwc_tensor_op_f32,
@@ -57,6 +57,53 @@ TEST(SM75_Device_Conv2d_Fprop_With_Broadcast_Analytic_ImplicitGemm_f16nhwc_f16nh
     cutlass::half_t,
     8,
     cutlass::epilogue::thread::ReLu<float>
+  >;
+
+  /// Device-level Conv2d instance
+  using Conv2dFpropKernel = typename cutlass::conv::kernel::DefaultConv2dFpropWithBroadcast<
+    ElementA, cutlass::layout::TensorNHWC,
+    ElementB, cutlass::layout::TensorNHWC,
+    ElementC, cutlass::layout::TensorNHWC,
+    ElementAccumulator,
+    cutlass::arch::OpClassTensorOp,
+    cutlass::arch::Sm75,
+    cutlass::gemm::GemmShape<128, 128, 32>,
+    cutlass::gemm::GemmShape<64, 64, 32>,
+    cutlass::gemm::GemmShape<16, 8, 8>,
+    EpilogueOutputOp,
+    cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<>,
+    2,
+    cutlass::arch::OpMultiplyAdd,
+    cutlass::conv::IteratorAlgorithm::kAnalytic
+  >::Kernel;
+
+  using Conv2dFprop = cutlass::conv::device::ImplicitGemmConvolution<Conv2dFpropKernel>;
+
+  /// Run all unit test sizes with device-level Conv2d instance
+  EXPECT_TRUE(test::conv::device::TestAllConv2dWithBroadcast<Conv2dFprop>());
+}
+
+TEST(SM75_Device_Conv2d_Fprop_With_Broadcast_Add_Broadcast_First_Analytic_ImplicitGemm_f16nhwc_f16nhwc_f32nhwc_tensor_op_f32,
+  128x128_32x2_64x64x32) {
+
+  /// Conv operation element types for the Gemm equivalent (ImplicitGemm)
+  using ElementA           = cutlass::half_t;
+  using ElementB           = cutlass::half_t;
+  using ElementC           = cutlass::half_t;
+  using ElementAccumulator = float;
+  using ElementCompute     = float;
+
+  using EpilogueOutputOp = cutlass::epilogue::thread::LinearCombinationBiasElementwise<
+    cutlass::half_t,
+    float,
+    float,
+    cutlass::half_t,
+    cutlass::half_t,
+    8,
+    cutlass::epilogue::thread::ReLu<float>,
+    cutlass::plus<float>,
+    cutlass::epilogue::thread::Sigmoid<float>,
+    true
   >;
 
   /// Device-level Conv2d instance
