@@ -1,55 +1,9 @@
-/***************************************************************************************************
- * Copyright (c) 2017-2021, NVIDIA CORPORATION.  All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without modification, are permitted
- * provided that the following conditions are met:
- *     * Redistributions of source code must retain the above copyright notice, this list of
- *       conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright notice, this list of
- *       conditions and the following disclaimer in the documentation and/or other materials
- *       provided with the distribution.
- *     * Neither the name of the NVIDIA CORPORATION nor the names of its contributors may be used
- *       to endorse or promote products derived from this software without specific prior written
- *       permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR
- * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND
- * FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL NVIDIA CORPORATION BE LIABLE
- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
- * BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
- * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
- * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- **************************************************************************************************/
-
-/**
-
-   This example shows how to fuse activation's per channel scale+bias+relu
-   into the wgrad mainloop.
-
-   Compared with original fprop kernel, this example has two more vectors, one for
-   the scale and one for the bias.  The length of the vectors are the same as the
-   activation channel number.  This kernels loads the vectors when the associated
-   activation channels are loaded in the mainloop.  Between reading the
-   activations and scale/bias data from the shared memory and calling tensor core
-   instructions, scale+bias+relu is computed in the register file.
-
-   This example is customized for Ampere 16816 fp16 tensor core instruction.
-   Changing to different data types or different tensor core instruction require
-   source code changing.  See
-   include/cutlass/conv/threadblock/implicit_gemm_wgrad_fusion_multistage.h for more
-   technical details.
-*/
-
 #include <iostream>
 #include <sstream>
 
 #include "cutlass/cutlass.h"
 #include "cutlass/gemm/device/gemm.h"
-#include "cutlass/conv/kernel/default_conv2d_wgrad_fusion.h"
 #include "cutlass/conv/kernel/default_conv2d_wgrad.h"
-#include "cutlass/conv/device/implicit_gemm_convolution_fusion.h"
 #include "cutlass/conv/device/implicit_gemm_convolution.h"
 
 #include "cutlass/util/command_line.h"
@@ -72,7 +26,6 @@ using ElementAccumulator = float;                  // Data type of accumulator
 using ElementComputeEpilogue = float;              // Data type of epilogue computation (alpha, beta)
 using ElementInputA = cutlass::half_t;             // Data type of elements in input tensor
 using ElementInputB = cutlass::half_t;             // Data type of elements in input tensor
-using ElementInputScaleBias = cutlass::half_t;     // Data type of elements in input sclae and bias vectors
 using ElementOutput = float;                       // Data type of elements in output tensor
 using ElementC = ElementOutput;
 using ElementCompute = ElementComputeEpilogue;
@@ -394,12 +347,6 @@ Result profile_convolution(Options const &options) {
 
   cutlass::HostTensor<ElementInputA, LayoutInputA> tensor_a(options.output_size());
   cutlass::HostTensor<ElementInputB, LayoutInputB> tensor_b(options.input_size);
-  cutlass::HostTensor<ElementInputA, LayoutInputA> tensor_transformed_b(options.input_size);
-  cutlass::HostTensor<ElementInputScaleBias, LayoutInputScaleBias>
-    tensor_b_scale({1, options.input_size.c()});
-  cutlass::HostTensor<ElementInputScaleBias, LayoutInputScaleBias>
-    tensor_b_bias({1, options.input_size.c()});
-
   cutlass::HostTensor<ElementOutput, LayoutOutput> tensor_c(options.filter_size);
   cutlass::HostTensor<ElementOutput, LayoutOutput> tensor_d(options.filter_size);
   cutlass::HostTensor<ElementOutput, LayoutOutput> tensor_ref_c(options.filter_size);
@@ -424,24 +371,6 @@ Result profile_convolution(Options const &options) {
 						    ElementInputB(-8),
 						    0);
 
-  // Fill scale vector for tensor B on host with uniform-distribution random
-  // data
-  cutlass::reference::host::TensorFillRandomUniform(
-						    tensor_b_scale.host_view(),
-						    1,
-						    ElementInputA(3),
-						    ElementInputA(-4),
-						    0);
-
-  // Fill bias vector for tensor B on host with uniform-distribution random
-  // data
-  cutlass::reference::host::TensorFillRandomUniform(
-						    tensor_b_bias.host_view(),
-						    1,
-						    ElementInputA(3),
-						    ElementInputA(-4),
-						    0);
-
   // Fill tensor C on host with zeros
   cutlass::reference::host::TensorFill(
 				       tensor_c.host_view());
@@ -456,8 +385,6 @@ Result profile_convolution(Options const &options) {
   // Copy data from host to GPU
   tensor_a.sync_device();
   tensor_b.sync_device();
-  tensor_b_scale.sync_device();
-  tensor_b_bias.sync_device();
   tensor_c.sync_device();
   tensor_d.sync_device();
   tensor_ref_c.sync_device();
@@ -467,10 +394,9 @@ Result profile_convolution(Options const &options) {
   //
 
   cutlass::conv::Mode mode = cutlass::conv::Mode::kCrossCorrelation;
-  // cutlass::conv::SplitKMode const split_k_mode = cutlass::conv::SplitKMode::kParallel;
-  cutlass::conv::SplitKMode const split_k_mode = cutlass::conv::SplitKMode::kSerial;
+  cutlass::conv::SplitKMode const split_k_mode = cutlass::conv::SplitKMode::kParallel;
+  // cutlass::conv::SplitKMode const split_k_mode = cutlass::conv::SplitKMode::kSerial;
 
-  // Split K dimension into 1 partitions
   int split_k_slices = 8;
 
   // Construct Conv2dProblemSize with user defined output size
@@ -490,7 +416,7 @@ Result profile_convolution(Options const &options) {
       tensor_a.device_ref(),
       tensor_b.device_ref(),
       tensor_c.device_ref(),
-      tensor_c.device_ref(),
+      tensor_d.device_ref(),
       {options.alpha, options.beta},
       };
 
@@ -498,29 +424,29 @@ Result profile_convolution(Options const &options) {
   // Initialize CUTLASS Convolution
   //
 
-  ImplicitGemm implicit_gemm_fusion_op;
+  ImplicitGemm implicit_gemm;
 
-  size_t workspace_size = implicit_gemm_fusion_op.get_workspace_size(arguments);
+  size_t workspace_size = implicit_gemm.get_workspace_size(arguments);
 
   // Allocate workspace memory
   cutlass::device_memory::allocation<uint8_t> workspace(workspace_size);
 
-  result.status = implicit_gemm_fusion_op.can_implement(arguments);
+  result.status = implicit_gemm.can_implement(arguments);
   CUTLASS_CHECK(result.status);
 
-  result.status = implicit_gemm_fusion_op.initialize(arguments, workspace.get());
+  result.status = implicit_gemm.initialize(arguments, workspace.get());
   CUTLASS_CHECK(result.status);
 
   if (split_k_mode == cutlass::conv::SplitKMode::kParallel) {
     arguments.ref_D.reset(reinterpret_cast<ElementC*>(workspace.get()));
     arguments.output_op = {ElementCompute(1), ElementCompute(0)};
-    result.status = implicit_gemm_fusion_op.update(arguments, workspace.get());
+    result.status = implicit_gemm.update(arguments, workspace.get());
   }
 
   //
   // Launch initialized CUTLASS kernel
   //
-  result.status = implicit_gemm_fusion_op();
+  result.status = implicit_gemm();
 
   CUTLASS_CHECK(result.status);
 
@@ -537,8 +463,8 @@ Result profile_convolution(Options const &options) {
         ReductionStrideIndex(tensor_c.stride()[ImplicitGemm::ImplicitGemmKernel::kTensorCStrideIdx])
       },
       {
-        tensor_c.device_data(),
-        ReductionStrideIndex(tensor_c.stride()[ImplicitGemm::ImplicitGemmKernel::kTensorCStrideIdx])
+        tensor_d.device_data(),
+        ReductionStrideIndex(tensor_d.stride()[ImplicitGemm::ImplicitGemmKernel::kTensorCStrideIdx])
       },
       {
         tensor_c.device_data(),
@@ -558,19 +484,6 @@ Result profile_convolution(Options const &options) {
   if (options.reference_check) {
     std::cout << "Verification on device...\n";
 
-    // Compute scale + bias + relu in host code
-    for (int n = 0; n < options.input_size.n(); ++n) {
-      for (int h = 0; h < options.input_size.h(); ++h) {
-        for (int w = 0; w < options.input_size.w(); ++w) {
-          for (int c = 0; c < options.input_size.c(); ++c) {
-            tensor_transformed_b.at({n, h, w, c}) = tensor_b.at({n, h, w, c});
-          }
-        }
-      }
-    }
-
-    tensor_transformed_b.sync_device();
-
     // Compute with reference implementation
     cutlass::reference::device::Conv2dWgrad<
       ElementInputA,
@@ -585,7 +498,7 @@ Result profile_convolution(Options const &options) {
 	>(
 	  problem_size,
 	  tensor_a.device_ref(),
-	  tensor_transformed_b.device_ref(),
+	  tensor_b.device_ref(),
 	  tensor_c.device_ref(),
 	  tensor_ref_c.device_ref(),
 	  options.alpha,
@@ -594,10 +507,23 @@ Result profile_convolution(Options const &options) {
 
     // Check if output from CUTLASS kernel and reference kernel are equal or not
     tensor_c.sync_host();
+    tensor_d.sync_host();
     tensor_ref_c.sync_host();
 
+    for (int n = 0; n < options.filter_size.n(); ++n) {
+      for (int h = 0; h < options.filter_size.h(); ++h) {
+        for (int w = 0; w < options.filter_size.w(); ++w) {
+          for (int c = 0; c < options.filter_size.c(); ++c) {
+	    if (tensor_d.at({n, h, w, c}) != tensor_ref_c.at({n, h, w, c})) {
+	      std::cout << tensor_d.at({n, h, w, c}) << ", " << tensor_ref_c.at({n, h, w, c}) << std::endl;
+	    }
+          }
+        }
+      }
+    }
+
     bool passed = cutlass::reference::host::TensorEquals(
-							 tensor_c.host_view(),
+							 tensor_d.host_view(),
 							 tensor_ref_c.host_view());
 
     if (!passed) {
@@ -663,7 +589,7 @@ Result profile_convolution(Options const &options) {
 
     // Launch a sequence of implicit GEMM operations on the device
     for (int iteration = 0; iteration < options.iterations; ++iteration) {
-      result.status = implicit_gemm_fusion_op();
+      result.status = implicit_gemm();
       CUTLASS_CHECK(result.status);
     }
 
@@ -705,20 +631,6 @@ Result profile_convolution(Options const &options) {
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
 int main(int argc, char const **args) {
-
-  bool notSupported = false;
-
-  // Ampere Tensor Core operations exposed with mma.sync are first available in CUDA 11.0.
-  //
-  // CUTLASS must be compiled with CUDA 11 Toolkit to run Conv2dFprop examples.
-  if (!(__CUDACC_VER_MAJOR__ > 11 || (__CUDACC_VER_MAJOR__ == 11 && __CUDACC_VER_MINOR__ >= 0))) {
-    std::cerr << "Ampere Tensor Core operations must be compiled with CUDA 11.0 Toolkit or later." << std::endl;
-    notSupported = true;
-  }
-
-  cudaDeviceProp props;
-  CUDA_CHECK(cudaGetDeviceProperties(&props, 0));
-
   Options options;
 
   options.parse(argc, args);
