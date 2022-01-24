@@ -25,13 +25,13 @@
 
 /**
 
-This example shows how to fuse activation's per channel scale+bias+relu 
+This example shows how to fuse activation's per channel scale+bias+relu
 into the wgrad mainloop.
 
 Compared with original fprop kernel, this example has two more vectors, one for
 the scale and one for the bias.  The length of the vectors are the same as the
 activation channel number.  This kernels loads the vectors when the associated
-activation channels are loaded in the mainloop.  Between reading the 
+activation channels are loaded in the mainloop.  Between reading the
 activations and scale/bias data from the shared memory and calling tensor core
 instructions, scale+bias+relu is computed in the register file.
 
@@ -48,7 +48,9 @@ technical details.
 #include "cutlass/cutlass.h"
 #include "cutlass/gemm/device/gemm.h"
 #include "cutlass/conv/kernel/default_conv2d_wgrad_fusion.h"
+#include "cutlass/conv/kernel/default_conv2d_wgrad.h"
 #include "cutlass/conv/device/implicit_gemm_convolution_fusion.h"
+#include "cutlass/conv/device/implicit_gemm_convolution.h"
 
 #include "cutlass/util/command_line.h"
 #include "cutlass/util/host_tensor.h"
@@ -63,7 +65,7 @@ technical details.
 #include "helper.h"
 
 // The code section below describes datatype for input, output tensors and computation between
-// elements 
+// elements
 using ElementAccumulator = float;                  // Data type of accumulator
 using ElementComputeEpilogue = float;              // Data type of epilogue computation (alpha, beta)
 using ElementInputA = cutlass::half_t;             // Data type of elements in input tensor
@@ -109,10 +111,9 @@ using EpilogueOp = cutlass::epilogue::thread::LinearCombination<
     ElementAccumulator,                                // Data type of accumulator
     ElementComputeEpilogue>;                           // Data type for alpha/beta in linear combination
 
-using Conv2dWgradFusionKernel = typename cutlass::conv::kernel::DefaultConv2dWgradFusion<
+using Conv2dWgradKernel = typename cutlass::conv::kernel::DefaultConv2dWgrad<
   ElementInputA, LayoutInputA,
   ElementInputB, LayoutInputB,
-  ElementInputScaleBias, LayoutInputScaleBias,
   ElementOutput, LayoutOutput,
   ElementAccumulator,
   MMAOp,
@@ -127,7 +128,7 @@ using Conv2dWgradFusionKernel = typename cutlass::conv::kernel::DefaultConv2dWgr
   IteratorAlgorithm
 >::Kernel;
 
-using ImplicitGemmFusion = cutlass::conv::device::ImplicitGemmConvolutionFusion<Conv2dWgradFusionKernel>;
+using ImplicitGemm = cutlass::conv::device::ImplicitGemmConvolution<Conv2dWgradKernel>;
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -238,11 +239,11 @@ struct Options {
     cmd.get_cmd_line_argument("k", filter_size.n());
     cmd.get_cmd_line_argument("r", filter_size.h());
     cmd.get_cmd_line_argument("s", filter_size.w());
-    filter_size.c() = input_size.c(); 
+    filter_size.c() = input_size.c();
 
     cmd.get_cmd_line_argument("alpha", alpha);
     cmd.get_cmd_line_argument("beta", beta);
-    
+
     cmd.get_cmd_line_argument("iterations", iterations);
     cmd.get_cmd_line_argument("tag", tag);
 
@@ -287,7 +288,7 @@ struct Options {
 
     return out;
   }
-  
+
   /// Computes the output tensor size (NPQK)
   cutlass::Tensor4DCoord output_size() const {
     return cutlass::Tensor4DCoord(
@@ -302,7 +303,7 @@ struct Options {
 
     // Number of multiply-adds = NPQK * CRS
     int64_t fmas = output_size().product() * int64_t(filter_size.h() * filter_size.w() * filter_size.c());
-    
+
     // Two flops per multiply-add
     return 2.0 * double(fmas) / double(1.0e9) / runtime_s;
   }
@@ -317,8 +318,8 @@ struct Result {
   cutlass::Status reference_check;
   cudaError_t error;
 
-  Result(): 
-    runtime_ms(0), 
+  Result():
+    runtime_ms(0),
     gflops(0),
     status(cutlass::Status::kSuccess),
     reference_check(cutlass::Status::kInvalid),
@@ -341,7 +342,7 @@ struct Result {
       out << options.tag << ",";
     }
 
-    out 
+    out
       << "conv_" << idx << ","
       << options.input_size.n() << ","
       << options.input_size.h() << ","
@@ -445,7 +446,7 @@ Result profile_convolution(Options const &options) {
   int split_k_slices = 1;
 
   // Construct Conv2dProblemSize with user defined output size
-  cutlass::conv::Conv2dProblemSize problem_size(      
+  cutlass::conv::Conv2dProblemSize problem_size(
       options.input_size,
       options.filter_size,
       options.padding,
@@ -456,12 +457,10 @@ Result profile_convolution(Options const &options) {
       split_k_slices
   );
 
-  typename ImplicitGemmFusion::Arguments arguments{
+  typename ImplicitGemm::Arguments arguments{
     problem_size,
     tensor_a.device_ref(),
     tensor_b.device_ref(),
-    tensor_b_scale.device_ref(),
-    tensor_b_bias.device_ref(),
     tensor_c.device_ref(),
     tensor_c.device_ref(),
     {options.alpha, options.beta},
@@ -471,7 +470,7 @@ Result profile_convolution(Options const &options) {
   // Initialize CUTLASS Convolution
   //
 
-  ImplicitGemmFusion implicit_gemm_fusion_op;
+  ImplicitGemm implicit_gemm_fusion_op;
 
   size_t workspace_size = implicit_gemm_fusion_op.get_workspace_size(arguments);
 
@@ -494,7 +493,7 @@ Result profile_convolution(Options const &options) {
   //
   // Optional reference check
   //
-  
+
   if (options.reference_check) {
     std::cout << "Verification on device...\n";
 
@@ -503,10 +502,10 @@ Result profile_convolution(Options const &options) {
       for (int h = 0; h < options.input_size.h(); ++h) {
         for (int w = 0; w < options.input_size.w(); ++w) {
           for (int c = 0; c < options.input_size.c(); ++c) {
-            tensor_transformed_b.at({n, h, w, c}) = std::max(
-                ElementOutput(0), ElementOutput(tensor_b.at({n, h, w, c}) *
-                                                    tensor_b_scale.at({0, c}) +
-                                                tensor_b_bias.at({0, c})));
+            tensor_transformed_b.at({n, h, w, c}) = tensor_b.at({n, h, w, c}); // std::max(
+                // ElementOutput(0), ElementOutput(tensor_b.at({n, h, w, c}) *
+                //                                     tensor_b_scale.at({0, c}) +
+                //                                 tensor_b_bias.at({0, c})));
           }
         }
       }
@@ -561,14 +560,14 @@ Result profile_convolution(Options const &options) {
     std::stringstream ss;
 
     ss << "26_ampere_fused_wgrad_batch_normalization_"
-      << options.input_size.n() << "x" << options.input_size.h() << "x" << options.input_size.w() << "x" << options.input_size.c() 
+      << options.input_size.n() << "x" << options.input_size.h() << "x" << options.input_size.w() << "x" << options.input_size.c()
       << "_"
-      << options.filter_size.n() << "x" << options.filter_size.h() << "x" << options.filter_size.w() << "x" << options.filter_size.c() 
+      << options.filter_size.n() << "x" << options.filter_size.h() << "x" << options.filter_size.w() << "x" << options.filter_size.c()
       << ".dat";
 
     std::ofstream output_workspace(ss.str());
 
-    output_workspace 
+    output_workspace
       << "Input = \n" << tensor_a.host_view() << "\n\n"
       << "Filters = \n" << tensor_b.host_view() << "\n\n";
 
@@ -580,7 +579,7 @@ Result profile_convolution(Options const &options) {
 
     std::cout << "Results written to '" << ss.str() << "'." << std::endl;
   }
- 
+
   //
   // Performance measurement
   //
@@ -588,7 +587,7 @@ Result profile_convolution(Options const &options) {
   if (options.measure_performance) {
 
     cudaEvent_t events[2];
-    
+
     for (auto & event : events) {
       result.error = cudaEventCreate(&event);
       if (result.error != cudaSuccess) {
@@ -672,7 +671,7 @@ int main(int argc, char const **args) {
   }
 
   Options options;
-  
+
   options.parse(argc, args);
 
   if (options.help) {
