@@ -401,6 +401,7 @@ Result profile_convolution(Options const &options) {
     tensor_b_bias({1, options.input_size.c()});
 
   cutlass::HostTensor<ElementOutput, LayoutOutput> tensor_c(options.filter_size);
+  cutlass::HostTensor<ElementOutput, LayoutOutput> tensor_d(options.filter_size);
   cutlass::HostTensor<ElementOutput, LayoutOutput> tensor_ref_c(options.filter_size);
 
   //
@@ -445,6 +446,9 @@ Result profile_convolution(Options const &options) {
   cutlass::reference::host::TensorFill(
 				       tensor_c.host_view());
 
+  cutlass::reference::host::TensorFill(
+				       tensor_d.host_view());
+
   // Fill tensor C for reference on host with zeros
   cutlass::reference::host::TensorFill(
 				       tensor_ref_c.host_view());
@@ -455,6 +459,7 @@ Result profile_convolution(Options const &options) {
   tensor_b_scale.sync_device();
   tensor_b_bias.sync_device();
   tensor_c.sync_device();
+  tensor_d.sync_device();
   tensor_ref_c.sync_device();
 
   //
@@ -558,10 +563,7 @@ Result profile_convolution(Options const &options) {
       for (int h = 0; h < options.input_size.h(); ++h) {
         for (int w = 0; w < options.input_size.w(); ++w) {
           for (int c = 0; c < options.input_size.c(); ++c) {
-            tensor_transformed_b.at({n, h, w, c}) = tensor_b.at({n, h, w, c}); // std::max(
-	    // ElementOutput(0), ElementOutput(tensor_b.at({n, h, w, c}) *
-	    //                                     tensor_b_scale.at({0, c}) +
-	    //                                 tensor_b_bias.at({0, c})));
+            tensor_transformed_b.at({n, h, w, c}) = tensor_b.at({n, h, w, c});
           }
         }
       }
