@@ -357,6 +357,7 @@ Result profile_convolution(Options const &options) {
   cutlass::HostTensor<ElementInputB, LayoutInputB> tensor_b(options.input_size);
   cutlass::HostTensor<ElementOutput, LayoutOutput> tensor_c(options.filter_size);
   cutlass::HostTensor<ElementOutput, LayoutOutput> tensor_d(options.filter_size);
+  cutlass::HostTensor<ElementCompute, LayoutOutput> tensor_d_tmp(options.filter_size);
   cutlass::HostTensor<ElementOutput, LayoutOutput> tensor_ref_c(options.filter_size);
 
   //
@@ -419,11 +420,12 @@ Result profile_convolution(Options const &options) {
 						split_k_slices
 						);
 
+  using cutlass::layout::TensorNHWC;
   typename ImplicitGemm::Arguments arguments{
     problem_size,
       tensor_a.device_ref(),
       tensor_b.device_ref(),
-      tensor_d_tmp.device_ref(),
+      {nullptr, TensorNHWC()},
       tensor_d_tmp.device_ref(),
       {options.alpha, options.beta},
       split_k_mode
