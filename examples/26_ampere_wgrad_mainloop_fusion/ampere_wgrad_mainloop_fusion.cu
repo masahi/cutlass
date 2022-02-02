@@ -26,7 +26,7 @@ using ElementAccumulator = float;                  // Data type of accumulator
 using ElementComputeEpilogue = float;              // Data type of epilogue computation (alpha, beta)
 using ElementInputA = cutlass::half_t;             // Data type of elements in input tensor
 using ElementInputB = cutlass::half_t;             // Data type of elements in input tensor
-using ElementOutput = float;                       // Data type of elements in output tensor
+using ElementOutput = cutlass::half_t;                       // Data type of elements in output tensor
 using ElementC = ElementOutput;
 using ElementCompute = ElementComputeEpilogue;
 using LayoutInputA = cutlass::layout::TensorNHWC;
@@ -59,25 +59,33 @@ constexpr int NumStages = 5;
 static cutlass::conv::IteratorAlgorithm const IteratorAlgorithm = cutlass::conv::IteratorAlgorithm::kOptimized;
 
 // This code section describes the epilogue part of the kernel, we use default value
+using EpilogueOp_tmp = cutlass::epilogue::thread::LinearCombination<
+    ElementCompute,                                     // Data type of output matrix.
+      128 / cutlass::sizeof_bits<ElementCompute>::value,  // The number of elements per vectorized.
+    // memory access. This becomes the vector width of
+    // math instructions in the epilogue too.
+      ElementAccumulator,                                // Data type of accumulator
+      ElementComputeEpilogue>;                           // Data type for alpha/beta in linear combination
+
 using EpilogueOp = cutlass::epilogue::thread::LinearCombination<
     ElementOutput,                                     // Data type of output matrix.
       128 / cutlass::sizeof_bits<ElementOutput>::value,  // The number of elements per vectorized.
     // memory access. This becomes the vector width of
     // math instructions in the epilogue too.
       ElementAccumulator,                                // Data type of accumulator
-      ElementComputeEpilogue>;                           // Data type for alpha/beta in linear combination
+      ElementComputeEpilogue>;                           // Data type for alpha/beta in lin
 
 using Conv2dWgradKernel = typename cutlass::conv::kernel::DefaultConv2dWgrad<
   ElementInputA, LayoutInputA,
     ElementInputB, LayoutInputB,
-    ElementOutput, LayoutOutput,
+    ElementAccumulator, LayoutOutput,
     ElementAccumulator,
     MMAOp,
     SmArch,
     ThreadblockShape,
     WarpShape,
     InstructionShape,
-    EpilogueOp,
+    EpilogueOp_tmp,
     SwizzleThreadBlock,
     NumStages,
     cutlass::arch::OpMultiplyAdd,
@@ -415,9 +423,10 @@ Result profile_convolution(Options const &options) {
     problem_size,
       tensor_a.device_ref(),
       tensor_b.device_ref(),
-      tensor_c.device_ref(),
-      tensor_d.device_ref(),
+      tensor_d_tmp.device_ref(),
+      tensor_d_tmp.device_ref(),
       {options.alpha, options.beta},
+      split_k_mode
       };
 
   //
@@ -438,7 +447,7 @@ Result profile_convolution(Options const &options) {
   CUTLASS_CHECK(result.status);
 
   if (split_k_mode == cutlass::conv::SplitKMode::kParallel) {
-    arguments.ref_D.reset(reinterpret_cast<ElementC*>(workspace.get()));
+    arguments.ref_D.reset(reinterpret_cast<ElementCompute*>(workspace.get()));
     arguments.output_op = {ElementCompute(1), ElementCompute(0)};
     result.status = implicit_gemm.update(arguments, workspace.get());
   }
