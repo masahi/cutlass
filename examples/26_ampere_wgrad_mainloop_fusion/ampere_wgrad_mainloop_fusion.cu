@@ -357,7 +357,6 @@ Result profile_convolution(Options const &options) {
   cutlass::HostTensor<ElementInputB, LayoutInputB> tensor_b(options.input_size);
   cutlass::HostTensor<ElementOutput, LayoutOutput> tensor_c(options.filter_size);
   cutlass::HostTensor<ElementOutput, LayoutOutput> tensor_d(options.filter_size);
-  cutlass::HostTensor<ElementCompute, LayoutOutput> tensor_d_tmp(options.filter_size);
   cutlass::HostTensor<ElementOutput, LayoutOutput> tensor_ref_c(options.filter_size);
 
   //
@@ -404,7 +403,6 @@ Result profile_convolution(Options const &options) {
 
   cutlass::conv::Mode mode = cutlass::conv::Mode::kCrossCorrelation;
   cutlass::conv::SplitKMode const split_k_mode = cutlass::conv::SplitKMode::kParallel;
-  // cutlass::conv::SplitKMode const split_k_mode = cutlass::conv::SplitKMode::kSerial;
 
   int split_k_slices = 8;
 
@@ -426,7 +424,7 @@ Result profile_convolution(Options const &options) {
       tensor_a.device_ref(),
       tensor_b.device_ref(),
       {nullptr, TensorNHWC()},
-      tensor_d_tmp.device_ref(),
+      {nullptr, TensorNHWC()},
       {options.alpha, options.beta},
       split_k_mode
       };
@@ -439,20 +437,22 @@ Result profile_convolution(Options const &options) {
 
   size_t workspace_size = implicit_gemm.get_workspace_size(arguments);
 
+  std::cout << "workspace size: " << workspace_size << std::endl;
+
   // Allocate workspace memory
   cutlass::device_memory::allocation<uint8_t> workspace(workspace_size);
 
   result.status = implicit_gemm.can_implement(arguments);
   CUTLASS_CHECK(result.status);
 
+  cutlass::layout::TensorNHWC layout_D(TensorNHWC::packed(options.filter_size));
+  arguments.ref_D.reset(reinterpret_cast<ElementCompute*>(workspace.get()), layout_D);
+
   result.status = implicit_gemm.initialize(arguments, workspace.get());
   CUTLASS_CHECK(result.status);
 
-  if (split_k_mode == cutlass::conv::SplitKMode::kParallel) {
-    arguments.ref_D.reset(reinterpret_cast<ElementCompute*>(workspace.get()));
-    arguments.output_op = {ElementCompute(1), ElementCompute(0)};
-    result.status = implicit_gemm.update(arguments, workspace.get());
-  }
+  arguments.output_op = {ElementCompute(1), ElementCompute(0)};
+  result.status = implicit_gemm.update(arguments, workspace.get());
 
   //
   // Launch initialized CUTLASS kernel
@@ -525,9 +525,9 @@ Result profile_convolution(Options const &options) {
       for (int h = 0; h < options.filter_size.h(); ++h) {
         for (int w = 0; w < options.filter_size.w(); ++w) {
           for (int c = 0; c < options.filter_size.c(); ++c) {
-	    if (tensor_d.at({n, h, w, c}) != tensor_ref_c.at({n, h, w, c})) {
-	      std::cout << tensor_d.at({n, h, w, c}) << ", " << tensor_ref_c.at({n, h, w, c}) << std::endl;
-	    }
+	    // if (tensor_d.at({n, h, w, c}) != tensor_ref_c.at({n, h, w, c})) {
+	    //   std::cout << tensor_d.at({n, h, w, c}) << ", " << tensor_ref_c.at({n, h, w, c}) << std::endl;
+	    // }
           }
         }
       }
