@@ -47,8 +47,6 @@
 #include "cutlass/util/host_tensor.h"
 #include "cutlass/util/packed_stride.hpp"
 #include "cutlass/util/tensor_view_io.h"
-#include "cutlass/util/reference/device/gemm.h"
-#include "cutlass/util/reference/device/tensor_compare.h"
 #include "cutlass/util/reference/device/tensor_fill.h"
 
 #include "helper.h"
@@ -310,16 +308,6 @@ using GemmKernel = cutlass::gemm::kernel::GemmUniversal<
       >;
 
 using Gemm = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel>;
-
-using DeviceGemmReference = cutlass::reference::device::Gemm<
-  ElementA,
-    LayoutA,
-    ElementB,
-    LayoutB,
-    ElementC,
-    LayoutC,
-    ElementAccumulator,
-    ElementAccumulator>;
 
 using StrideA = typename Gemm::GemmKernel::StrideA;
 using StrideB = typename Gemm::GemmKernel::StrideB;
