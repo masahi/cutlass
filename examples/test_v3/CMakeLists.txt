@@ -30,16 +30,11 @@
 
 
 cutlass_example_add_executable(
-  test_v3
-  test.cu
+  test_sm80
+  test_sm80.cu
   )
 
 cutlass_example_add_executable(
-  test_out_dtype
-  test_out_dtype.cu
-  )
-
-cutlass_example_add_executable(
-  test_epilogue_multiple_sources
-  test_epilogue_multiple_sources.cu
+  test_custom_epilogue
+  test_custom_epilogue
   )

@@ -121,7 +121,6 @@ public:
       int thread_idx,
       char* smem_buf)
   {
-    using namespace cute;
     using X = Underscore;
 
     static_assert(rank(ProblemShapeMNKL{}) == 4, "ProblemShapeMNKL must be rank 4");
