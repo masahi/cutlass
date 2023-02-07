@@ -38,3 +38,8 @@ cutlass_example_add_executable(
   test_out_dtype
   test_out_dtype.cu
   )
+
+cutlass_example_add_executable(
+  test_epilogue_multiple_sources
+  test_epilogue_multiple_sources.cu
+  )

@@ -34,7 +34,6 @@
 
 #include "cute/tensor.hpp"
 #include "cutlass/tensor_ref.h"
-#include "cutlass/epilogue/collective/default_epilogue.hpp"
 #include "cutlass/epilogue/thread/linear_combination.h"
 #include "cutlass/epilogue/thread/scale_type.h"
 #include "cutlass/gemm/dispatch_policy.hpp"
@@ -55,9 +54,137 @@
 #include "helper.h"
 
 using namespace cute;
-
 using namespace cutlass;
 using namespace cutlass::gemm;
+
+template <
+  class StrideC_,
+  class StrideD_,
+  class ThreadEpilogueOp_
+>
+class EpilogueThreeSources {
+public:
+  using ThreadEpilogueOp = ThreadEpilogueOp_;
+  using ElementOutput = typename ThreadEpilogueOp::ElementOutput;
+  using ElementAccumulator = typename ThreadEpilogueOp::ElementAccumulator;
+  using ElementCompute = typename ThreadEpilogueOp::ElementCompute;
+  using ElementScalar = ElementCompute;
+  using ElementC = typename ThreadEpilogueOp::ElementC;
+  using StrideC = StrideC_;
+  using ElementD = typename ThreadEpilogueOp::ElementD;
+  using StrideD = StrideD_;
+
+  static const int kOutputAlignment = ThreadEpilogueOp::kCount;
+  using AlignmentType = typename cute::uint_bit<cutlass::sizeof_bits<ElementOutput>::value * kOutputAlignment>::type;
+
+  static_assert(rank(StrideC{}) == 3, "StrideCD must be rank-3: [M, N, L]");
+  static_assert(rank(StrideD{}) == 3, "StrideCD must be rank-3: [M, N, L]");
+
+  struct SharedStorage { };
+
+  struct Params {
+    ElementC const* ptr_C1 = nullptr;
+    ElementC const* ptr_C2 = nullptr;
+    ElementC const* ptr_C3 = nullptr;
+    StrideC dC{};
+    ElementD* ptr_D = nullptr;
+    StrideD dD{};
+    typename ThreadEpilogueOp::Params thread_params{};
+  };
+
+  template <class Args>
+  static constexpr Params
+  to_underlying_arguments(Args const& args, void* workspace) {
+    (void) workspace;
+    return {args.epilogue_params};
+  }
+
+  CUTLASS_HOST_DEVICE
+  EpilogueThreeSources(Params const& params_) : params(params_) { }
+
+  template<
+    class ProblemShapeMNKL,
+    class BlockShapeMNK,
+    class BlockCoordMNKL,
+    class FrgEngine, class FrgLayout,
+    class TiledMma,
+    class ResidueMNK
+  >
+  CUTLASS_HOST_DEVICE void
+  operator()(
+      ProblemShapeMNKL problem_shape_mnkl,
+      BlockShapeMNK blk_shape_MNK,
+      BlockCoordMNKL blk_coord_mnkl,
+      cute::Tensor<FrgEngine, FrgLayout> const& accumulators,
+      TiledMma tiled_mma,
+      ResidueMNK residue_mnk,
+      int thread_idx,
+      char* smem_buf)
+  {
+    using namespace cute;
+    using X = Underscore;
+
+    static_assert(rank(ProblemShapeMNKL{}) == 4, "ProblemShapeMNKL must be rank 4");
+    static_assert(is_static<BlockShapeMNK>::value, "ThreadBlock tile shape must be static");
+    static_assert(rank(BlockShapeMNK{}) == 3, "BlockShapeMNK must be rank 3");
+    static_assert(rank(BlockCoordMNKL{}) == 4, "BlockCoordMNKL must be rank 3");
+
+    (void) smem_buf;
+    ThreadEpilogueOp epilogue_op{params.thread_params};
+
+    // Separate out problem shape for convenience
+    auto M = get<0>(problem_shape_mnkl);
+    auto N = get<1>(problem_shape_mnkl);
+    auto L = get<3>(problem_shape_mnkl);
+    // Slice to get the tile this CTA is responsible for
+    auto [m_coord, n_coord, k_coord, l_coord] = blk_coord_mnkl;
+
+    // Represent the full output tensor
+    Tensor mD_mnl = make_tensor(make_gmem_ptr(params.ptr_D), make_shape(M,N,L), params.dD);                // (m,n,l)
+    Tensor gD_mnl = local_tile(mD_mnl, blk_shape_MNK, make_coord(_,_,_), Step<_1,_1, X>{});    // (BLK_M,BLK_N,m,n,l)
+    Tensor gD = gD_mnl(_,_,m_coord,n_coord,l_coord);                                                 // (BLK_M,BLK_N)
+
+    // Partition source and destination tiles to match the accumulator partitioning
+    auto thr_mma = tiled_mma.get_thread_slice(thread_idx);
+    Tensor tCgD = thr_mma.partition_C(gD);                                       // (VEC,THR_M,THR_N)
+
+    // Make an identity coordinate tensor for predicating our output MN tile
+    auto cD = make_identity_tensor(make_shape(unwrap(shape<0>(gD)), unwrap(shape<1>(gD))));
+    Tensor tCcD = thr_mma.partition_C(cD);
+
+    static_assert(is_static<FrgLayout>::value, "Accumulator layout must be static");
+    CUTE_STATIC_ASSERT_V(size(tCgD) == size(accumulators),
+        "Accumulator count must have the same destination element count.");
+
+    Tensor mC1_mnl = make_tensor(make_gmem_ptr(params.ptr_C1), make_shape(M,N,L), params.dC);                // (m,n,l)
+    Tensor gC1_mnl = local_tile(mC1_mnl, blk_shape_MNK, make_coord(_,_,_), Step<_1,_1, X>{});    // (BLK_M,BLK_N,m,n,l)
+    Tensor gC1 = gC1_mnl(_,_,m_coord,n_coord,l_coord);                                                 // (BLK_M,BLK_N)
+    Tensor tCgC1 = thr_mma.partition_C(gC1);                                       // (VEC,THR_M,THR_N)
+
+    Tensor mC2_mnl = make_tensor(make_gmem_ptr(params.ptr_C2), make_shape(M,N,L), params.dC);                // (m,n,l)
+    Tensor gC2_mnl = local_tile(mC2_mnl, blk_shape_MNK, make_coord(_,_,_), Step<_1,_1, X>{});    // (BLK_M,BLK_N,m,n,l)
+    Tensor gC2 = gC2_mnl(_,_,m_coord,n_coord,l_coord);                                                 // (BLK_M,BLK_N)
+    Tensor tCgC2 = thr_mma.partition_C(gC2);                                       // (VEC,THR_M,THR_N)
+
+    Tensor mC3_mnl = make_tensor(make_gmem_ptr(params.ptr_C3), make_shape(M,N,L), params.dC);                // (m,n,l)
+    Tensor gC3_mnl = local_tile(mC3_mnl, blk_shape_MNK, make_coord(_,_,_), Step<_1,_1, X>{});    // (BLK_M,BLK_N,m,n,l)
+    Tensor gC3 = gC3_mnl(_,_,m_coord,n_coord,l_coord);                                                 // (BLK_M,BLK_N)
+    Tensor tCgC3 = thr_mma.partition_C(gC3);                                       // (VEC,THR_M,THR_N)
+
+    CUTE_STATIC_ASSERT_V(size(tCgC1) == size(tCgD),
+        "Source and destination must have the same number of elements.");
+
+    CUTLASS_PRAGMA_UNROLL
+    for (int i = 0; i < size(accumulators); ++i) {
+      if (elem_less(tCcD(i), make_coord(get<0>(residue_mnk), get<1>(residue_mnk)))) {
+        tCgD(i) = epilogue_op(accumulators(i), tCgC1(i) + tCgC2(i) + tCgC3(i));
+      }
+    }
+  }
+
+private:
+  Params params;
+};
 
 // A matrix configuration
 using         ElementA    = cutlass::half_t;                                          // Element type for A matrix operand
@@ -158,7 +285,7 @@ using SmemLayoutAtomB =  DefaultOperandB::SmemLayoutAtom; // N, K
 using SmemCopyAtomB =  DefaultOperandB::SmemCopyAtom;
 using GmemTiledCopyB =  DefaultOperandB::GmemTiledCopy;
 
-using CollectiveEpilogue = cutlass::epilogue::collective::DefaultEpilogue<
+using CollectiveEpilogue = EpilogueThreeSources<
     cutlass::gemm::TagToStrideC_t<LayoutC>,
       cutlass::gemm::TagToStrideC_t<LayoutC>,
       cutlass::epilogue::thread::LinearCombination<ElementC, 1, ElementAccumulator, ElementAccumulator,
@@ -212,7 +339,9 @@ uint64_t seed;
 
 cutlass::DeviceAllocation<typename Gemm::ElementA> block_A;
 cutlass::DeviceAllocation<typename Gemm::ElementB> block_B;
-cutlass::DeviceAllocation<typename Gemm::ElementC> block_C;
+cutlass::DeviceAllocation<typename Gemm::ElementC> block_C1;
+cutlass::DeviceAllocation<typename Gemm::ElementC> block_C2;
+cutlass::DeviceAllocation<typename Gemm::ElementC> block_C3;
 cutlass::DeviceAllocation<typename Gemm::EpilogueOutputOp::ElementOutput> block_D;
 cutlass::DeviceAllocation<typename Gemm::EpilogueOutputOp::ElementOutput> block_ref_D;
 
@@ -340,13 +469,17 @@ void initialize(const Options &options) {
 
   block_A.reset(options.m * options.k);
   block_B.reset(options.k * options.n);
-  block_C.reset(options.m * options.n);
+  block_C1.reset(options.m * options.n);
+  block_C2.reset(options.m * options.n);
+  block_C3.reset(options.m * options.n);
   block_D.reset(options.m * options.n);
   block_ref_D.reset(options.m * options.n);
 
   initialize_block(block_A, seed + 2023);
   initialize_block(block_B, seed + 2022);
-  initialize_block(block_C, seed + 2021);
+  initialize_block(block_C1, seed + 2021);
+  initialize_block(block_C2, seed + 2021);
+  initialize_block(block_C3, seed + 2021);
 }
 
 /// Populates a Gemm::Arguments structure from the given commandline options
@@ -359,7 +492,7 @@ typename Gemm::Arguments args_from_options(const Options &options)
       stride_A,
       block_B.get(),
       stride_B,
-	{block_C.get(), stride_C, block_D.get(), stride_D, {options.alpha, options.beta}}
+      {block_C1.get(), block_C2.get(), block_C3.get(), stride_C, block_D.get(), stride_D, {options.alpha, options.beta}}
   };
 
   return arguments;
@@ -391,29 +524,6 @@ int run(Options &options)
 
   // Correctness / Warmup iteration
   CUTLASS_CHECK(gemm.run());
-
-  // Check if output from CUTLASS kernel and reference kernel are equal or not
-  Result result;
-
-  // Run profiling loop
-  if (options.iterations > 0)
-    {
-      GpuTimer timer;
-      timer.start();
-      for (int iter = 0; iter < options.iterations; ++iter) {
-	CUTLASS_CHECK(gemm.run());
-      }
-      timer.stop();
-
-      // Compute average runtime and GFLOPs.
-      float elapsed_ms = timer.elapsed_millis();
-      result.avg_runtime_ms = double(elapsed_ms) / double(options.iterations);
-      result.gflops = options.gflops(result.avg_runtime_ms / 1000.0);
-
-      std::cout << "  Problem Size: " << options.m << 'x' << options.n << 'x' << options.k << std::endl;
-      std::cout << "  Avg runtime: " << result.avg_runtime_ms << " ms" << std::endl;
-      std::cout << "  GFLOPS: " << result.gflops << std::endl;
-    }
 
   return 0;
 }
