@@ -66,12 +66,12 @@ constexpr int AlignmentA  = 128 / cutlass::sizeof_bits<ElementA>::value;    // M
 
 // B matrix configuration
 using         ElementB    = cutlass::half_t;                                          // Element type for B matrix operand
-using         LayoutB     = cutlass::layout::ColumnMajor;                   // Layout type for B matrix operand
+using         LayoutB     = cutlass::layout::RowMajor;                   // Layout type for B matrix operand
 constexpr int AlignmentB  = 128 / cutlass::sizeof_bits<ElementB>::value;    // Memory access granularity/alignment of B matrix in units of elements (up to 16 bytes)
 
 // C/D matrix configuration
 using         ElementC    = float;                                          // Element type for C and D matrix operands
-using         LayoutC     = cutlass::layout::ColumnMajor;                   // Layout type for C and D matrix operands
+using         LayoutC     = cutlass::layout::RowMajor;                   // Layout type for C and D matrix operands
 
 // Core kernel configurations
 using ElementAccumulator  = float;                                          // Element type for internal accumulation
@@ -109,7 +109,24 @@ struct DefaultGemm_TensorOpSm80_OperandA<half_t, layout::RowMajor, 8, 64>
 						 Layout<Shape < _1,_8>>{}));
 };
 
-// Because the F32F16 TiledMMA is A-B symmetric, we can reuse the DefaultOperands
+/// Operand A - Column-major (M-major)
+template <int SizeK>
+struct DefaultGemm_TensorOpSm80_OperandA<half_t, layout::ColumnMajor, 8, SizeK>
+{
+  // Smem
+  using SmemLayoutAtom = decltype(
+    composition(Swizzle<3,3,3>{},
+                Layout<Shape <_64, _8>,
+                       Stride< _1,_64>>{}));
+  using SmemCopyAtom = Copy_Atom<SM75_U16x8_LDSM_T, half_t>;
+
+  // Gmem
+  using GmemTiledCopy = decltype(
+    make_tiled_copy(Copy_Atom<SM80_CP_ASYNC_CACHEALWAYS<cute::uint128_t>, half_t>{},
+                    Layout<Shape <_16, _8>,
+                           Stride< _1,_16>>{},
+                    Layout<Shape < _8, _1>>{}));
+};
 
 // Operand B - Column-Major (K-major)
 template <int Alignment, int SizeK>
@@ -122,10 +139,6 @@ template <int Alignment, int SizeK>
 struct DefaultGemm_TensorOpSm80_OperandB<half_t, layout::RowMajor,    Alignment, SizeK>
   : DefaultGemm_TensorOpSm80_OperandA<half_t, layout::ColumnMajor, Alignment, SizeK>
 {};
-
-//
-// F16: 128-by-128-by-32 (small k-block)
-//
 
 /// Operand A - Row-major (K-Major)
 template <>
@@ -146,8 +159,11 @@ struct DefaultGemm_TensorOpSm80_OperandA<half_t, layout::RowMajor, 8, 32>
 						 Layout<Shape < _1,_8>>{}));
 };
 
+constexpr int TileK = 32;
+using TileShape = Shape<_128,_128,_32>;
+
 using DefaultOperandA = DefaultGemm_TensorOpSm80_OperandA<
-    half_t, LayoutA, AlignmentA, 32>;
+    half_t, LayoutA, AlignmentA, TileK>;
 
 using SmemLayoutAtomA = DefaultOperandA::SmemLayoutAtom; // M, K
 using SmemCopyAtomA = DefaultOperandA::SmemCopyAtom;
@@ -155,7 +171,7 @@ using GmemTiledCopyA = DefaultOperandA::GmemTiledCopy;
 
 // B
 using DefaultOperandB = DefaultGemm_TensorOpSm80_OperandB<
-    half_t, LayoutB, AlignmentB, 32>;
+    half_t, LayoutB, AlignmentB, TileK>;
 using SmemLayoutAtomB =  DefaultOperandB::SmemLayoutAtom; // N, K
 using SmemCopyAtomB =  DefaultOperandB::SmemCopyAtom;
 using GmemTiledCopyB =  DefaultOperandB::GmemTiledCopy;
@@ -164,8 +180,6 @@ using CollectiveEpilogue = cutlass::epilogue::collective::DefaultEpilogue<
     cutlass::gemm::TagToStrideC_t<LayoutC>,
       cutlass::gemm::TagToStrideC_t<LayoutC>,
       cutlass::epilogue::thread::LinearCombination<ElementC, 1, ElementAccumulator, ElementAccumulator>>;
-
-using TileShape          = Shape<_128,_128,_32>;                           // Threadblock-level tile size
 
 using CollectiveMainloop = collective::CollectiveMma<
     DispatchPolicy, TileShape,
