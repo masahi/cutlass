@@ -132,6 +132,7 @@ foreach(EXAMPLE
   49_hopper_gemm_with_collective_builder
   50_hopper_gemm_with_epilogue_swizzle
   51_hopper_gett
+  layer_norm_bench
   )
 
   add_subdirectory(${EXAMPLE})
