@@ -6,15 +6,18 @@
 #include "cutlass/util/device_layernorm.h"
 #include "cutlass/util/host_tensor.h"
 #include "cutlass/constants.h"
+#include "cutlass/util/reference/host/tensor_copy.h"
+#include "cutlass/util/reference/host/tensor_fill.h"
+#include "cutlass/util/reference/host/tensor_compare.h"
 
 using ElementType = cutlass::half_t;
 using Layout = cutlass::layout::RowMajor;
 
 void layernorm_host(cutlass::MatrixCoord tensor_size,
-		    cutlass::HostTensor<ElementType, Layout> output,
-		    cutlass::HostTensor<ElementType, Layout> input,
-		    cutlass::HostTensor<ElementType, Layout> gamma,
-		    cutlass::HostTensor<ElementType, Layout> beta) {
+		    cutlass::TensorRef<ElementType, Layout> output,
+		    cutlass::TensorRef<ElementType, Layout> input,
+		    cutlass::TensorRef<ElementType, Layout> gamma,
+		    cutlass::TensorRef<ElementType, Layout> beta) {
   const int M = tensor_size.row();
   const int N = tensor_size.column();
 
@@ -28,22 +31,80 @@ void layernorm_host(cutlass::MatrixCoord tensor_size,
       square_sum += inp * inp;
     }
 
-    ElementType mean = static_cast<ElementType>(sum / (float)N);
-    ElementType sq_mean = static_cast<ElementType>(square_sum / (float)N);
-    float sqrt_var = cutlass::fast_sqrt(static_cast<float>(sq_mean - mean * mean + ElementType(1e-6)));
-    ElementType inv_sqrt_var = cutlass::constants::one<ElementType>() / static_cast<ElementType>(sqrt_var);
-
+    float mean = sum / (float)N;
+    float sq_mean = square_sum / (float)N;
+    float sqrt_var = cutlass::fast_sqrt(sq_mean - mean * mean + (float)1e-6);
     for (int n = 0; n < N; ++n) {
-      output.at({m, n}) = (input.at({m, n}) - mean) * inv_sqrt_var * gamma.at({0, n}) + beta.at({0, n});
+      float inp = static_cast<float>(input.at({m, n}));
+      float g = static_cast<float>(gamma.at({0, n}));
+      float b = static_cast<float>(beta.at({0, n}));
+      float res_fp32 = (inp - mean) / sqrt_var * g + b;
+      output.at({m, n}) = ElementType(res_fp32);
     }
   }
-
-
 }
 
 int main(int argc, const char **argv) {
-  cutlass::HostTensor<ElementType, Layout> input, output, gamma, beta;
+  cudaStream_t stream;
+  cudaStreamCreate(&stream);
 
+  cutlass::HostTensor<ElementType, Layout> input, output_ref, output, gamma, beta;
+
+  const int M = 128;
+  const int N = 64;
+
+  input.reset({M, N});
+  output.reset({M, N});
+  output_ref.reset({M, N});
+  gamma.reset({1, N});
+  beta.reset({1, N});
+
+  const unsigned seed = 2022;
+
+  cutlass::reference::host::TensorFillRandomUniform(input.host_view(),
+						    seed,
+						    ElementType(5),
+						    ElementType(-5),
+						    0);
+
+  cutlass::reference::host::TensorFillRandomUniform(gamma.host_view(),
+						    seed,
+						    ElementType(5),
+						    ElementType(-5),
+						    0);
+
+  cutlass::reference::host::TensorFillRandomUniform(beta.host_view(),
+						    seed,
+						    ElementType(5),
+						    ElementType(-5),
+						    0);
+
+  input.sync_device();
+  gamma.sync_device();
+  beta.sync_device();
+
+  layernorm_host({M, N}, output_ref.host_ref(), input.host_ref(), gamma.host_ref(), beta.host_ref());
+  layernorm({M, N}, output.device_ref(),
+	    input.device_ref(), gamma.device_ref(), beta.device_ref(), stream);
+
+  output.sync_host();
+
+  float max_abs_diff = -1;
+  float mean_abs_diff = 0;
+  for (int m = 0; m < M; ++m) {
+    for (int n = 0; n < N; ++n) {
+      auto diff = abs(static_cast<float>(output_ref.at({m, n}) - output.at({m, n})));
+      mean_abs_diff += diff;
+      max_abs_diff = max(max_abs_diff, diff);
+    }
+  }
+
+  mean_abs_diff /= (M * N);
+
+  //  std::cout << cutlass::reference::host::TensorEquals(output_ref.host_view(), output.host_view()) << std::endl;
+  std::cout << max_abs_diff << ", " << mean_abs_diff << std::endl;
+
+  cudaStreamDestroy(stream);
 
   return 0;
 }
