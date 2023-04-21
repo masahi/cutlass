@@ -34,6 +34,7 @@ void layernorm_host(cutlass::MatrixCoord tensor_size,
     float mean = sum / (float)N;
     float sq_mean = square_sum / (float)N;
     float sqrt_var = cutlass::fast_sqrt(sq_mean - mean * mean + (float)1e-6);
+
     for (int n = 0; n < N; ++n) {
       float inp = static_cast<float>(input.at({m, n}));
       float g = static_cast<float>(gamma.at({0, n}));
@@ -50,8 +51,8 @@ int main(int argc, const char **argv) {
 
   cutlass::HostTensor<ElementType, Layout> input, output_ref, output, gamma, beta;
 
-  const int M = 128;
-  const int N = 64;
+  const int M = std::stoi(argv[1]);
+  const int N = std::stoi(argv[2]);
 
   input.reset({M, N});
   output.reset({M, N});
@@ -87,6 +88,28 @@ int main(int argc, const char **argv) {
   layernorm({M, N}, output.device_ref(),
 	    input.device_ref(), gamma.device_ref(), beta.device_ref(), stream);
 
+  cudaEvent_t events[2];
+  for (cudaEvent_t &evt : events) {
+    cudaEventCreate(&evt);
+  }
+
+  cudaEventRecord(events[0]);
+
+  const int n_iters = 100;
+  for (int i = 0; i < n_iters; ++i) {
+    layernorm({M, N}, output.device_ref(),
+	      input.device_ref(), gamma.device_ref(), beta.device_ref(), stream);
+  }
+
+  cudaEventRecord(events[1]);
+
+  cudaDeviceSynchronize();
+
+  float elapsed_ms = 0;
+  cudaEventElapsedTime(&elapsed_ms, events[0], events[1]);
+
+  std::cout << "Elapsed us: " << elapsed_ms / float(n_iters) * 1e3 << std::endl;
+
   output.sync_host();
 
   float max_abs_diff = -1;
@@ -99,10 +122,10 @@ int main(int argc, const char **argv) {
     }
   }
 
-  mean_abs_diff /= (M * N);
+  mean_abs_diff /= float(M * N);
 
   //  std::cout << cutlass::reference::host::TensorEquals(output_ref.host_view(), output.host_view()) << std::endl;
-  std::cout << max_abs_diff << ", " << mean_abs_diff << std::endl;
+  std::cout << "Max and mean abs diff: " << max_abs_diff << ", " << mean_abs_diff << std::endl;
 
   cudaStreamDestroy(stream);
 
