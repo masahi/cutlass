@@ -112,10 +112,8 @@ int main(int argc, const char **argv) {
   beta.sync_device();
 
   layernorm_host({M, N}, output_ref.host_ref(), input.host_ref(), gamma.host_ref(), beta.host_ref());
-  layernorm({M, N}, output.device_ref(),
-	    input.device_ref(), gamma.device_ref(), beta.device_ref(), stream);
-  layernorm_half8({M, N}, output.device_ref(),
-		  input.device_ref(), gamma.device_ref(), beta.device_ref(), stream);
+  layernorm_half8_smem({M, N}, output.device_ref(),
+		       input.device_ref(), gamma.device_ref(), beta.device_ref(), stream);
 
   output.sync_host();
 
@@ -141,6 +139,11 @@ int main(int argc, const char **argv) {
 
   benchmark("Simple half8 kernel", [&]() {
       layernorm_half8({M, N}, output.device_ref(),
+		      input.device_ref(), gamma.device_ref(), beta.device_ref(), stream);
+    });
+
+  benchmark("half8 kernel with smem", [&]() {
+      layernorm_half8_smem({M, N}, output.device_ref(),
 		      input.device_ref(), gamma.device_ref(), beta.device_ref(), stream);
     });
 
