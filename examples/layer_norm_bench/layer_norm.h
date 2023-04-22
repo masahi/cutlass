@@ -266,12 +266,10 @@ __global__ void layernorm_twoPassAlgo_e8_smem(float4 *output,
   }
 }
 
-// template <int ILP = 8>
-__global__ void layernorm_twoPassAlgo_e8_smem_async(float4 *output,
-                                                    const float4 *input,
-                                                    const float4 *gamma,
-                                                    const float4 *beta,
-                                                    const int m, const int n) {
+__global__ void
+layernorm_twoPassAlgo_e8_smem_async(float4 *output, const float4 *input,
+                                    const float4 *gamma, const float4 *beta,
+                                    const int m, const int n) {
   const int m_idx = blockIdx.x;
   const int tid = threadIdx.x;
   const int bdimx = blockDim.x;
@@ -283,17 +281,6 @@ __global__ void layernorm_twoPassAlgo_e8_smem_async(float4 *output,
   int offset = m_idx * n_8;
   input += offset;
   output += offset;
-
-  //   for (int i = tid; i < n_8; i += bdimx * ILP) {
-  // #pragma unroll ILP
-  //     for (int ii = 0; ii < ILP; ++ii) {
-  //       int index = i + ii * bdimx;
-  //       if (index < n_8)
-  //         cutlass::arch::cp_async<sizeof(float4)>(&smem[index],
-  //         &input[index],
-  //                                                 true);
-  //     }
-  //   }
 
   for (int index = tid; index < n_8; index += bdimx) {
     cutlass::arch::cp_async<sizeof(float4)>(&smem[index], &input[index], true);
