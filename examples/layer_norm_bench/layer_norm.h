@@ -229,6 +229,7 @@ __global__ void layernorm_twoPassAlgo_e8_smem(float4* output,
   }
 }
 
+template <int ILP=8>
 __global__ void layernorm_twoPassAlgo_e8_smem_async(float4* output,
 						    const float4* input,
 						    const float4* gamma,
@@ -248,17 +249,22 @@ __global__ void layernorm_twoPassAlgo_e8_smem_async(float4* output,
   input += offset;
   output += offset;
 
-  for (int index = tid; index < n_8; index += bdimx) {
-    cutlass::arch::cp_async<sizeof(float4)>(&smem[index], &input[index], true);
+  for (int i = tid; i < n_8; i += bdimx * ILP) {
+#pragma unroll ILP
+    for (int ii = 0; ii < ILP; ++ii) {
+      int index = i + ii * bdimx;
+      if (index < n_8)
+	cutlass::arch::cp_async<sizeof(float4)>(&smem[index], &input[index], true);
+    }
   }
 
   cutlass::arch::cp_async_wait<0>();
 
   for (int index = tid; index < n_8; index += bdimx) {
-    const half2* h1 = (half2*)&smem[index].x;
-    const half2* h2 = (half2*)&smem[index].y;
-    const half2* h3 = (half2*)&smem[index].z;
-    const half2* h4 = (half2*)&smem[index].w;
+    const half2 *h1 = (half2 *)&smem[index].x;
+    const half2 *h2 = (half2 *)&smem[index].y;
+    const half2 *h3 = (half2 *)&smem[index].z;
+    const half2 *h4 = (half2 *)&smem[index].w;
     local_sums[0] += static_cast<float>(h1->x) + static_cast<float>(h1->y) +
                      static_cast<float>(h2->x) + static_cast<float>(h2->y) +
                      static_cast<float>(h3->x) + static_cast<float>(h3->y) +
@@ -358,7 +364,7 @@ void layernorm_half8(cutlass::MatrixCoord tensor_size,
   const cutlass::half_t* beta = ref_beta.data();
 
   dim3 grid(m);
-  dim3 block((n + 31)/32*32);
+  dim3 block((n / 8 + 31)/32*32);
 
   if (block.x > 1024){
     block.x = 1024;
@@ -386,7 +392,7 @@ void layernorm_half8_smem(cutlass::MatrixCoord tensor_size,
   const cutlass::half_t* beta = ref_beta.data();
 
   dim3 grid(m);
-  dim3 block((n + 31)/32*32);
+  dim3 block((n / 8 + 31)/32*32);
 
   if (block.x > 1024){
     block.x = 1024;
@@ -416,7 +422,7 @@ void layernorm_half8_smem_async(cutlass::MatrixCoord tensor_size,
   const cutlass::half_t* beta = ref_beta.data();
 
   dim3 grid(m);
-  dim3 block((n + 31)/32*32);
+  dim3 block((n / 8 + 31)/32*32);
 
   if (block.x > 1024){
     block.x = 1024;
