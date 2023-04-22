@@ -112,8 +112,8 @@ int main(int argc, const char **argv) {
   beta.sync_device();
 
   layernorm_host({M, N}, output_ref.host_ref(), input.host_ref(), gamma.host_ref(), beta.host_ref());
-  layernorm_half8_smem_async({M, N}, output.device_ref(),
-			     input.device_ref(), gamma.device_ref(), beta.device_ref(), stream);
+  layernorm_half_smem_async({M, N}, output.device_ref(),
+			    input.device_ref(), gamma.device_ref(), beta.device_ref(), stream);
 
   output.sync_host();
 
@@ -142,14 +142,14 @@ int main(int argc, const char **argv) {
 		      input.device_ref(), gamma.device_ref(), beta.device_ref(), stream);
     });
 
-  benchmark("half8 kernel with smem", [&]() {
+  benchmark("half kernel with smem", [&]() {
       layernorm_half8_smem({M, N}, output.device_ref(),
 			   input.device_ref(), gamma.device_ref(), beta.device_ref(), stream);
     });
 
-  benchmark("half8 kernel with smem and async", [&]() {
-      layernorm_half8_smem_async({M, N}, output.device_ref(),
-				 input.device_ref(), gamma.device_ref(), beta.device_ref(), stream);
+  benchmark("half kernel with smem and async", [&]() {
+      layernorm_half_smem_async({M, N}, output.device_ref(),
+				input.device_ref(), gamma.device_ref(), beta.device_ref(), stream);
     });
 
   cudaStreamDestroy(stream);
