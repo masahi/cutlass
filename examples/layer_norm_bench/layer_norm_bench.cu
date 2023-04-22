@@ -47,6 +47,31 @@ void layernorm_host(cutlass::MatrixCoord tensor_size,
   }
 }
 
+template <typename Func>
+void benchmark(const std::string& name, Func f) {
+
+  cudaEvent_t events[2];
+  for (cudaEvent_t &evt : events) {
+    cudaEventCreate(&evt);
+  }
+
+  cudaEventRecord(events[0]);
+
+  const int n_iters = 100;
+  for (int i = 0; i < n_iters; ++i) {
+    f();
+  }
+
+  cudaEventRecord(events[1]);
+
+  cudaDeviceSynchronize();
+
+  float elapsed_ms = 0;
+  cudaEventElapsedTime(&elapsed_ms, events[0], events[1]);
+
+  std::cout << name << ", elapsed us: " << elapsed_ms / float(n_iters) * 1e3 << std::endl;
+}
+
 int main(int argc, const char **argv) {
   cudaStream_t stream;
   cudaStreamCreate(&stream);
@@ -87,34 +112,10 @@ int main(int argc, const char **argv) {
   beta.sync_device();
 
   layernorm_host({M, N}, output_ref.host_ref(), input.host_ref(), gamma.host_ref(), beta.host_ref());
-  // layernorm({M, N}, output.device_ref(),
-  // 	    input.device_ref(), gamma.device_ref(), beta.device_ref(), stream);
+  layernorm({M, N}, output.device_ref(),
+	    input.device_ref(), gamma.device_ref(), beta.device_ref(), stream);
   layernorm_half8({M, N}, output.device_ref(),
 		  input.device_ref(), gamma.device_ref(), beta.device_ref(), stream);
-
-  cudaEvent_t events[2];
-  for (cudaEvent_t &evt : events) {
-    cudaEventCreate(&evt);
-  }
-
-  cudaEventRecord(events[0]);
-
-  const int n_iters = 100;
-  for (int i = 0; i < n_iters; ++i) {
-    // layernorm({M, N}, output.device_ref(),
-    // 	      input.device_ref(), gamma.device_ref(), beta.device_ref(), stream);
-    layernorm_half8({M, N}, output.device_ref(),
-		    input.device_ref(), gamma.device_ref(), beta.device_ref(), stream);
-  }
-
-  cudaEventRecord(events[1]);
-
-  cudaDeviceSynchronize();
-
-  float elapsed_ms = 0;
-  cudaEventElapsedTime(&elapsed_ms, events[0], events[1]);
-
-  std::cout << "Elapsed us: " << elapsed_ms / float(n_iters) * 1e3 << std::endl;
 
   output.sync_host();
 
@@ -131,7 +132,17 @@ int main(int argc, const char **argv) {
   mean_abs_diff /= float(M * N);
 
   //  std::cout << cutlass::reference::host::TensorEquals(output_ref.host_view(), output.host_view()) << std::endl;
-  std::cout << "Max and mean abs diff: " << max_abs_diff << ", " << mean_abs_diff << std::endl;
+  std::cout << "Max and mean abs diff: " << max_abs_diff << ", " << mean_abs_diff << "\n\n";
+
+  benchmark("CUTLASS layer norm", [&]() {
+      layernorm({M, N}, output.device_ref(),
+		input.device_ref(), gamma.device_ref(), beta.device_ref(), stream);
+    });
+
+  benchmark("Simple half8 kernel", [&]() {
+      layernorm_half8({M, N}, output.device_ref(),
+		      input.device_ref(), gamma.device_ref(), beta.device_ref(), stream);
+    });
 
   cudaStreamDestroy(stream);
 
