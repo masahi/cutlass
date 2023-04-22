@@ -536,26 +536,24 @@ void layernorm_half_smem(
   const cutlass::half_t *gamma = ref_gamma.data();
   const cutlass::half_t *beta = ref_beta.data();
 
-  const int smem_size_bytes = n * sizeof(cutlass::half_t);
-  dim3 grid(m);
-
-  if (n % 8 == 0) {
-    dim3 block((n / 8 + 31) / 32 * 32);
-
-    if (block.x > 1024) {
-      block.x = 1024;
-    }
-
+  auto set_smem_size = [](auto kernel, int smem_size_bytes) {
     if (smem_size_bytes >= (48 << 10)) {
       cudaError_t result = cudaFuncSetAttribute(
-          layernorm_twoPassAlgo_e8_smem<use_async>,
-          cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size_bytes);
+          kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size_bytes);
 
       if (result != cudaSuccess) {
         std::cerr << "CUDA error:" << cudaGetErrorString(result) << std::endl;
         abort();
       }
     }
+  };
+
+  const int smem_size_bytes = n * sizeof(cutlass::half_t);
+  dim3 grid(m);
+
+  if (n % 8 == 0) {
+    dim3 block(min(1024, (n / 8 + 31) / 32 * 32));
+    set_smem_size(layernorm_twoPassAlgo_e8_smem<use_async>, smem_size_bytes);
 
     layernorm_twoPassAlgo_e8_smem<use_async>
         <<<grid, block, smem_size_bytes, stream>>>(
@@ -563,22 +561,8 @@ void layernorm_half_smem(
             (const float4 *)beta, m, n);
 
   } else if (n % 4 == 0) {
-    dim3 block((n / 4 + 31) / 32 * 32);
-
-    if (block.x > 1024) {
-      block.x = 1024;
-    }
-
-    if (smem_size_bytes >= (48 << 10)) {
-      cudaError_t result = cudaFuncSetAttribute(
-          layernorm_twoPassAlgo_e4_smem<use_async>,
-          cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size_bytes);
-
-      if (result != cudaSuccess) {
-        std::cerr << "CUDA error:" << cudaGetErrorString(result) << std::endl;
-        abort();
-      }
-    }
+    dim3 block(min(1024, (n / 4 + 31) / 32 * 32));
+    set_smem_size(layernorm_twoPassAlgo_e4_smem<use_async>, smem_size_bytes);
 
     layernorm_twoPassAlgo_e4_smem<use_async>
         <<<grid, block, smem_size_bytes, stream>>>(
@@ -586,22 +570,8 @@ void layernorm_half_smem(
             (const float2 *)beta, m, n);
 
   } else if (n % 2 == 0) {
-    dim3 block((n / 2 + 31) / 32 * 32);
-
-    if (block.x > 1024) {
-      block.x = 1024;
-    }
-
-    if (smem_size_bytes >= (48 << 10)) {
-      cudaError_t result = cudaFuncSetAttribute(
-          layernorm_twoPassAlgo_e2_smem<use_async>,
-          cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size_bytes);
-
-      if (result != cudaSuccess) {
-        std::cerr << "CUDA error:" << cudaGetErrorString(result) << std::endl;
-        abort();
-      }
-    }
+    dim3 block(min(1024, (n / 2 + 31) / 32 * 32));
+    set_smem_size(layernorm_twoPassAlgo_e2_smem<use_async>, smem_size_bytes);
 
     layernorm_twoPassAlgo_e2_smem<use_async>
         <<<grid, block, smem_size_bytes, stream>>>(
