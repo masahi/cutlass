@@ -112,8 +112,8 @@ int main(int argc, const char **argv) {
   beta.sync_device();
 
   layernorm_host({M, N}, output_ref.host_ref(), input.host_ref(), gamma.host_ref(), beta.host_ref());
-  layernorm_half_smem_async({M, N}, output.device_ref(),
-			    input.device_ref(), gamma.device_ref(), beta.device_ref(), stream);
+  cutlass::layernorm_half_smem<true>({M, N}, output.device_ref(),
+				     input.device_ref(), gamma.device_ref(), beta.device_ref(), stream);
 
   output.sync_host();
 
@@ -133,23 +133,23 @@ int main(int argc, const char **argv) {
   std::cout << "Max and mean abs diff: " << max_abs_diff << ", " << mean_abs_diff << "\n\n";
 
   benchmark("CUTLASS layer norm", [&]() {
-      layernorm({M, N}, output.device_ref(),
-		input.device_ref(), gamma.device_ref(), beta.device_ref(), stream);
+      cutlass::layernorm({M, N}, output.device_ref(),
+			 input.device_ref(), gamma.device_ref(), beta.device_ref(), stream);
     });
 
   benchmark("Simple half8 kernel", [&]() {
-      layernorm_half8({M, N}, output.device_ref(),
-		      input.device_ref(), gamma.device_ref(), beta.device_ref(), stream);
+      cutlass::layernorm_half8({M, N}, output.device_ref(),
+			       input.device_ref(), gamma.device_ref(), beta.device_ref(), stream);
     });
 
   benchmark("half kernel with smem", [&]() {
-      layernorm_half8_smem({M, N}, output.device_ref(),
-			   input.device_ref(), gamma.device_ref(), beta.device_ref(), stream);
+      cutlass::layernorm_half_smem<false>({M, N}, output.device_ref(),
+					  input.device_ref(), gamma.device_ref(), beta.device_ref(), stream);
     });
 
   benchmark("half kernel with smem and async", [&]() {
-      layernorm_half_smem_async({M, N}, output.device_ref(),
-				input.device_ref(), gamma.device_ref(), beta.device_ref(), stream);
+      cutlass::layernorm_half_smem<true>({M, N}, output.device_ref(),
+					 input.device_ref(), gamma.device_ref(), beta.device_ref(), stream);
     });
 
   cudaStreamDestroy(stream);
