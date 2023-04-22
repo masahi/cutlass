@@ -266,11 +266,12 @@ __global__ void layernorm_twoPassAlgo_e8_smem(float4 *output,
   }
 }
 
-template <int ILP = 8>
-__global__ void
-layernorm_twoPassAlgo_e8_smem_async(float4 *output, const float4 *input,
-                                    const float4 *gamma, const float4 *beta,
-                                    const int m, const int n) {
+// template <int ILP = 8>
+__global__ void layernorm_twoPassAlgo_e8_smem_async(float4 *output,
+                                                    const float4 *input,
+                                                    const float4 *gamma,
+                                                    const float4 *beta,
+                                                    const int m, const int n) {
   const int m_idx = blockIdx.x;
   const int tid = threadIdx.x;
   const int bdimx = blockDim.x;
@@ -283,14 +284,19 @@ layernorm_twoPassAlgo_e8_smem_async(float4 *output, const float4 *input,
   input += offset;
   output += offset;
 
-  for (int i = tid; i < n_8; i += bdimx * ILP) {
-#pragma unroll ILP
-    for (int ii = 0; ii < ILP; ++ii) {
-      int index = i + ii * bdimx;
-      if (index < n_8)
-        cutlass::arch::cp_async<sizeof(float4)>(&smem[index], &input[index],
-                                                true);
-    }
+  //   for (int i = tid; i < n_8; i += bdimx * ILP) {
+  // #pragma unroll ILP
+  //     for (int ii = 0; ii < ILP; ++ii) {
+  //       int index = i + ii * bdimx;
+  //       if (index < n_8)
+  //         cutlass::arch::cp_async<sizeof(float4)>(&smem[index],
+  //         &input[index],
+  //                                                 true);
+  //     }
+  //   }
+
+  for (int index = tid; index < n_8; index += bdimx) {
+    cutlass::arch::cp_async<sizeof(float4)>(&smem[index], &input[index], true);
   }
 
   cutlass::arch::cp_async_wait<0>();
@@ -429,6 +435,12 @@ void layernorm_half8(cutlass::MatrixCoord tensor_size,
   layernorm_twoPassAlgo_e8<<<grid, block, 0, stream>>>(
       (float4 *)output, (const float4 *)input, (const float4 *)gamma,
       (const float4 *)beta, m, n);
+
+  auto result = cudaGetLastError();
+  if (result != cudaSuccess) {
+    std::cerr << "CUDA error: " << cudaGetErrorString(result) << std::endl;
+    abort();
+  }
 }
 
 void layernorm_half8_smem(
@@ -455,12 +467,29 @@ void layernorm_half8_smem(
 
   const size_t smem_size_bytes = n * 2;
 
+  if (smem_size_bytes >= (48 << 10)) {
+    cudaError_t result = cudaFuncSetAttribute(
+        layernorm_twoPassAlgo_e8_smem,
+        cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size_bytes);
+
+    if (result != cudaSuccess) {
+      std::cerr << "CUDA error:" << cudaGetErrorString(result) << std::endl;
+      abort();
+    }
+  }
+
   layernorm_twoPassAlgo_e8_smem<<<grid, block, smem_size_bytes, stream>>>(
       (float4 *)output, (const float4 *)input, (const float4 *)gamma,
       (const float4 *)beta, m, n);
+
+  auto result = cudaGetLastError();
+  if (result != cudaSuccess) {
+    std::cerr << "CUDA error: " << cudaGetErrorString(result) << std::endl;
+    abort();
+  }
 }
 
-void layernorm_half8_smem_async(
+void layernorm_half_smem_async(
     cutlass::MatrixCoord tensor_size,
     TensorRef<cutlass::half_t, layout::RowMajor> ref_output,
     TensorRef<cutlass::half_t, layout::RowMajor> ref_input,
@@ -475,18 +504,44 @@ void layernorm_half8_smem_async(
   const cutlass::half_t *gamma = ref_gamma.data();
   const cutlass::half_t *beta = ref_beta.data();
 
+  const size_t smem_size_bytes = n * 2;
   dim3 grid(m);
-  dim3 block((n / 8 + 31) / 32 * 32);
 
-  if (block.x > 1024) {
-    block.x = 1024;
+  if (n % 8 == 0) {
+    dim3 block((n / 8 + 31) / 32 * 32);
+
+    if (block.x > 1024) {
+      block.x = 1024;
+    }
+
+    if (smem_size_bytes >= (48 << 10)) {
+      cudaError_t result = cudaFuncSetAttribute(
+          layernorm_twoPassAlgo_e8_smem_async,
+          cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size_bytes);
+
+      if (result != cudaSuccess) {
+        std::cerr << "CUDA error:" << cudaGetErrorString(result) << std::endl;
+        abort();
+      }
+    }
+
+    layernorm_twoPassAlgo_e8_smem_async<<<grid, block, smem_size_bytes,
+                                          stream>>>(
+        (float4 *)output, (const float4 *)input, (const float4 *)gamma,
+        (const float4 *)beta, m, n);
+
+  } else if (n % 4 == 0) {
+  } else if (n % 2 == 0) {
+  } else {
+    std::cerr << "Not implemented" << std::endl;
+    abort();
   }
 
-  const size_t smem_size_bytes = n * 2;
-
-  layernorm_twoPassAlgo_e8_smem_async<<<grid, block, smem_size_bytes, stream>>>(
-      (float4 *)output, (const float4 *)input, (const float4 *)gamma,
-      (const float4 *)beta, m, n);
+  auto result = cudaGetLastError();
+  if (result != cudaSuccess) {
+    std::cerr << "CUDA error: " << cudaGetErrorString(result) << std::endl;
+    abort();
+  }
 }
 
 } // namespace cutlass
