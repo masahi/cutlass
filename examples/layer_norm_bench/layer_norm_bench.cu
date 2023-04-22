@@ -10,6 +10,8 @@
 #include "cutlass/util/reference/host/tensor_fill.h"
 #include "cutlass/util/reference/host/tensor_compare.h"
 
+#include "layer_norm.h"
+
 using ElementType = cutlass::half_t;
 using Layout = cutlass::layout::RowMajor;
 
@@ -85,8 +87,10 @@ int main(int argc, const char **argv) {
   beta.sync_device();
 
   layernorm_host({M, N}, output_ref.host_ref(), input.host_ref(), gamma.host_ref(), beta.host_ref());
-  layernorm({M, N}, output.device_ref(),
-	    input.device_ref(), gamma.device_ref(), beta.device_ref(), stream);
+  // layernorm({M, N}, output.device_ref(),
+  // 	    input.device_ref(), gamma.device_ref(), beta.device_ref(), stream);
+  layernorm_half8({M, N}, output.device_ref(),
+		  input.device_ref(), gamma.device_ref(), beta.device_ref(), stream);
 
   cudaEvent_t events[2];
   for (cudaEvent_t &evt : events) {
@@ -97,8 +101,10 @@ int main(int argc, const char **argv) {
 
   const int n_iters = 100;
   for (int i = 0; i < n_iters; ++i) {
-    layernorm({M, N}, output.device_ref(),
-	      input.device_ref(), gamma.device_ref(), beta.device_ref(), stream);
+    // layernorm({M, N}, output.device_ref(),
+    // 	      input.device_ref(), gamma.device_ref(), beta.device_ref(), stream);
+    layernorm_half8({M, N}, output.device_ref(),
+		    input.device_ref(), gamma.device_ref(), beta.device_ref(), stream);
   }
 
   cudaEventRecord(events[1]);
