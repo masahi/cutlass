@@ -155,7 +155,7 @@ layernorm_twoPassAlgo_e8_smem(float4 *output, const float4 *input,
   input += offset;
   output += offset;
 
-  if (use_async) {
+  if constexpr (use_async) {
     for (int index = tid; index < n_8; index += bdimx) {
       cutlass::arch::cp_async<sizeof(float4)>(&smem[index], &input[index],
                                               true);
@@ -287,6 +287,207 @@ layernorm_twoPassAlgo_e8_smem(float4 *output, const float4 *input,
   }
 }
 
+template <bool use_async = false>
+__global__ void
+layernorm_twoPassAlgo_e4_smem(float2 *output, const float2 *input,
+                              const float2 *gamma, const float2 *beta,
+                              const int m, const int n) {
+  const int m_idx = blockIdx.x;
+  const int tid = threadIdx.x;
+  const int bdimx = blockDim.x;
+  __shared__ float s_mean, s_variance;
+  extern __shared__ float2 smem_f2[];
+
+  float local_sums[1] = {0.0f};
+  const int n_4 = n / 4;
+  int offset = m_idx * n_4;
+  input += offset;
+  output += offset;
+
+  if constexpr (use_async) {
+    for (int index = tid; index < n_4; index += bdimx) {
+      cutlass::arch::cp_async<sizeof(float2)>(&smem_f2[index], &input[index],
+                                              true);
+    }
+
+    cutlass::arch::cp_async_wait<0>();
+
+    for (int index = tid; index < n_4; index += bdimx) {
+      const half2 *h1 = (half2 *)&smem_f2[index].x;
+      const half2 *h2 = (half2 *)&smem_f2[index].y;
+      local_sums[0] += static_cast<float>(h1->x) + static_cast<float>(h1->y) +
+                       static_cast<float>(h2->x) + static_cast<float>(h2->y);
+    }
+
+  } else {
+    for (int index = tid; index < n_4; index += bdimx) {
+      smem_f2[index] = input[index];
+      const half2 *h1 = (half2 *)&smem_f2[index].x;
+      const half2 *h2 = (half2 *)&smem_f2[index].y;
+      local_sums[0] += static_cast<float>(h1->x) + static_cast<float>(h1->y) +
+                       static_cast<float>(h2->x) + static_cast<float>(h2->y);
+    }
+  }
+
+  if (blockDim.x <= 32) {
+    warpReduceSum<float, 1>(local_sums);
+  } else {
+    blockReduceSum<float, 1>(local_sums);
+  }
+  if (threadIdx.x == 0) {
+    s_mean = local_sums[0] / n;
+  }
+  __syncthreads();
+
+  local_sums[0] = 0.0f;
+  for (int index = tid; index < n_4; index += bdimx) {
+    const half2 *h1 = (half2 *)&smem_f2[index].x;
+    const half2 *h2 = (half2 *)&smem_f2[index].y;
+
+    local_sums[0] += (static_cast<float>(h1->x) - s_mean) *
+                     (static_cast<float>(h1->x) - s_mean);
+    local_sums[0] += (static_cast<float>(h1->y) - s_mean) *
+                     (static_cast<float>(h1->y) - s_mean);
+    local_sums[0] += (static_cast<float>(h2->x) - s_mean) *
+                     (static_cast<float>(h2->x) - s_mean);
+    local_sums[0] += (static_cast<float>(h2->y) - s_mean) *
+                     (static_cast<float>(h2->y) - s_mean);
+  }
+
+  if (blockDim.x <= 32) {
+    warpReduceSum<float, 1>(local_sums);
+  } else {
+    blockReduceSum<float, 1>(local_sums);
+  }
+  if (threadIdx.x == 0) {
+    s_variance = rsqrtf(local_sums[0] / n + 1e-5);
+  }
+  __syncthreads();
+
+  for (int index = tid; index < n_4; index += bdimx) {
+    const float2 gamma_val = gamma[index];
+    const float2 beta_val = beta[index];
+
+    const half2 *l1 = (half2 *)&smem_f2[index].x;
+    const half2 *l2 = (half2 *)&smem_f2[index].y;
+
+    const half2 *g1 = (half2 *)&gamma_val.x;
+    const half2 *g2 = (half2 *)&gamma_val.y;
+
+    const half2 *b1 = (half2 *)&beta_val.x;
+    const half2 *b2 = (half2 *)&beta_val.y;
+
+    float2 tmp;
+    half2 *h1 = (half2 *)&tmp.x;
+    half2 *h2 = (half2 *)&tmp.y;
+
+    h1->x = half((static_cast<float>(l1->x) - s_mean) * s_variance *
+                     static_cast<float>(g1->x) +
+                 static_cast<float>(b1->x));
+    h1->y = half((static_cast<float>(l1->y) - s_mean) * s_variance *
+                     static_cast<float>(g1->y) +
+                 static_cast<float>(b1->y));
+    h2->x = half((static_cast<float>(l2->x) - s_mean) * s_variance *
+                     static_cast<float>(g2->x) +
+                 static_cast<float>(b2->x));
+    h2->y = half((static_cast<float>(l2->y) - s_mean) * s_variance *
+                     static_cast<float>(g2->y) +
+                 static_cast<float>(b2->y));
+
+    output[index] = tmp;
+  }
+}
+
+template <bool use_async = false>
+__global__ void layernorm_twoPassAlgo_e2_smem(float *output, const float *input,
+                                              const float *gamma,
+                                              const float *beta, const int m,
+                                              const int n) {
+  const int m_idx = blockIdx.x;
+  const int tid = threadIdx.x;
+  const int bdimx = blockDim.x;
+  __shared__ float s_mean, s_variance;
+  extern __shared__ float smem_f1[];
+
+  float local_sums[1] = {0.0f};
+  const int n_2 = n / 2;
+  int offset = m_idx * n_2;
+  input += offset;
+  output += offset;
+
+  if constexpr (use_async) {
+    for (int index = tid; index < n_2; index += bdimx) {
+      cutlass::arch::cp_async<sizeof(float)>(&smem_f1[index], &input[index],
+                                             true);
+    }
+
+    cutlass::arch::cp_async_wait<0>();
+
+    for (int index = tid; index < n_2; index += bdimx) {
+      const half2 *h1 = (half2 *)&smem_f1[index];
+      local_sums[0] += static_cast<float>(h1->x) + static_cast<float>(h1->y);
+    }
+
+  } else {
+    for (int index = tid; index < n_2; index += bdimx) {
+      smem_f1[index] = input[index];
+      const half2 *h1 = (half2 *)&smem_f1[index];
+      local_sums[0] += static_cast<float>(h1->x) + static_cast<float>(h1->y);
+    }
+  }
+
+  if (blockDim.x <= 32) {
+    warpReduceSum<float, 1>(local_sums);
+  } else {
+    blockReduceSum<float, 1>(local_sums);
+  }
+  if (threadIdx.x == 0) {
+    s_mean = local_sums[0] / n;
+  }
+  __syncthreads();
+
+  local_sums[0] = 0.0f;
+  for (int index = tid; index < n_2; index += bdimx) {
+    const half2 *h1 = (half2 *)&smem_f1[index];
+
+    local_sums[0] += (static_cast<float>(h1->x) - s_mean) *
+                     (static_cast<float>(h1->x) - s_mean);
+    local_sums[0] += (static_cast<float>(h1->y) - s_mean) *
+                     (static_cast<float>(h1->y) - s_mean);
+  }
+
+  if (blockDim.x <= 32) {
+    warpReduceSum<float, 1>(local_sums);
+  } else {
+    blockReduceSum<float, 1>(local_sums);
+  }
+  if (threadIdx.x == 0) {
+    s_variance = rsqrtf(local_sums[0] / n + 1e-5);
+  }
+  __syncthreads();
+
+  for (int index = tid; index < n_2; index += bdimx) {
+    const float gamma_val = gamma[index];
+    const float beta_val = beta[index];
+
+    const half2 *l1 = (half2 *)&smem_f1[index];
+    const half2 *g1 = (half2 *)&gamma_val;
+    const half2 *b1 = (half2 *)&beta_val;
+
+    float tmp;
+    half2 *h1 = (half2 *)&tmp;
+
+    h1->x = half((static_cast<float>(l1->x) - s_mean) * s_variance *
+                     static_cast<float>(g1->x) +
+                 static_cast<float>(b1->x));
+    h1->y = half((static_cast<float>(l1->y) - s_mean) * s_variance *
+                     static_cast<float>(g1->y) +
+                 static_cast<float>(b1->y));
+
+    output[index] = tmp;
+  }
+}
+
 void layernorm_half8(cutlass::MatrixCoord tensor_size,
                      TensorRef<cutlass::half_t, layout::RowMajor> ref_output,
                      TensorRef<cutlass::half_t, layout::RowMajor> ref_input,
@@ -335,7 +536,7 @@ void layernorm_half_smem(
   const cutlass::half_t *gamma = ref_gamma.data();
   const cutlass::half_t *beta = ref_beta.data();
 
-  const size_t smem_size_bytes = n * 2;
+  const int smem_size_bytes = n * sizeof(cutlass::half_t);
   dim3 grid(m);
 
   if (n % 8 == 0) {
@@ -362,7 +563,51 @@ void layernorm_half_smem(
             (const float4 *)beta, m, n);
 
   } else if (n % 4 == 0) {
+    dim3 block((n / 4 + 31) / 32 * 32);
+
+    if (block.x > 1024) {
+      block.x = 1024;
+    }
+
+    if (smem_size_bytes >= (48 << 10)) {
+      cudaError_t result = cudaFuncSetAttribute(
+          layernorm_twoPassAlgo_e4_smem<use_async>,
+          cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size_bytes);
+
+      if (result != cudaSuccess) {
+        std::cerr << "CUDA error:" << cudaGetErrorString(result) << std::endl;
+        abort();
+      }
+    }
+
+    layernorm_twoPassAlgo_e4_smem<use_async>
+        <<<grid, block, smem_size_bytes, stream>>>(
+            (float2 *)output, (const float2 *)input, (const float2 *)gamma,
+            (const float2 *)beta, m, n);
+
   } else if (n % 2 == 0) {
+    dim3 block((n / 2 + 31) / 32 * 32);
+
+    if (block.x > 1024) {
+      block.x = 1024;
+    }
+
+    if (smem_size_bytes >= (48 << 10)) {
+      cudaError_t result = cudaFuncSetAttribute(
+          layernorm_twoPassAlgo_e2_smem<use_async>,
+          cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size_bytes);
+
+      if (result != cudaSuccess) {
+        std::cerr << "CUDA error:" << cudaGetErrorString(result) << std::endl;
+        abort();
+      }
+    }
+
+    layernorm_twoPassAlgo_e2_smem<use_async>
+        <<<grid, block, smem_size_bytes, stream>>>(
+            (float *)output, (const float *)input, (const float *)gamma,
+            (const float *)beta, m, n);
+
   } else {
     std::cerr << "Not implemented" << std::endl;
     abort();
