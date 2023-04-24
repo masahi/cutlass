@@ -503,15 +503,17 @@ void layernorm_half8(cutlass::MatrixCoord tensor_size,
   const cutlass::half_t *beta = ref_beta.data();
 
   dim3 grid(m);
-  dim3 block((n / 8 + 31) / 32 * 32);
 
-  if (block.x > 1024) {
-    block.x = 1024;
+  if (n % 8 == 0) {
+    dim3 block(min(1024, (n / 8 + 31) / 32 * 32));
+
+    layernorm_twoPassAlgo_e8<<<grid, block, 0, stream>>>(
+        (float4 *)output, (const float4 *)input, (const float4 *)gamma,
+        (const float4 *)beta, m, n);
+  } else {
+    return cutlass::layernorm(tensor_size, ref_output, ref_input, ref_gamma,
+                              ref_beta, stream);
   }
-
-  layernorm_twoPassAlgo_e8<<<grid, block, 0, stream>>>(
-      (float4 *)output, (const float4 *)input, (const float4 *)gamma,
-      (const float4 *)beta, m, n);
 
   auto result = cudaGetLastError();
   if (result != cudaSuccess) {
