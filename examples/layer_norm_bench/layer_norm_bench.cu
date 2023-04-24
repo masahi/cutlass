@@ -48,7 +48,7 @@ void layernorm_host(cutlass::MatrixCoord tensor_size,
 }
 
 template <typename Func>
-void benchmark(const std::string& name, Func f) {
+float benchmark(Func f) {
 
   cudaEvent_t events[2];
   for (cudaEvent_t &evt : events) {
@@ -69,7 +69,7 @@ void benchmark(const std::string& name, Func f) {
   float elapsed_ms = 0;
   cudaEventElapsedTime(&elapsed_ms, events[0], events[1]);
 
-  std::cout << name << ", elapsed us: " << elapsed_ms / float(n_iters) * 1e3 << std::endl;
+  return elapsed_ms / float(n_iters) * 1e3;
 }
 
 int main(int argc, const char **argv) {
@@ -111,47 +111,47 @@ int main(int argc, const char **argv) {
   gamma.sync_device();
   beta.sync_device();
 
-  layernorm_host({M, N}, output_ref.host_ref(), input.host_ref(), gamma.host_ref(), beta.host_ref());
-  cutlass::layernorm_half_smem<true>({M, N}, output.device_ref(),
-				     input.device_ref(), gamma.device_ref(), beta.device_ref(), stream);
+  // layernorm_host({M, N}, output_ref.host_ref(), input.host_ref(), gamma.host_ref(), beta.host_ref());
+  // cutlass::layernorm_half_smem<true>({M, N}, output.device_ref(),
+  // 				     input.device_ref(), gamma.device_ref(), beta.device_ref(), stream);
 
-  output.sync_host();
+  // output.sync_host();
 
-  float max_abs_diff = -1;
-  float mean_abs_diff = 0;
-  for (int m = 0; m < M; ++m) {
-    for (int n = 0; n < N; ++n) {
-      auto diff = abs(static_cast<float>(output_ref.at({m, n}) - output.at({m, n})));
-      mean_abs_diff += diff;
-      max_abs_diff = max(max_abs_diff, diff);
-    }
-  }
+  // float max_abs_diff = -1;
+  // float mean_abs_diff = 0;
+  // for (int m = 0; m < M; ++m) {
+  //   for (int n = 0; n < N; ++n) {
+  //     auto diff = abs(static_cast<float>(output_ref.at({m, n}) - output.at({m, n})));
+  //     mean_abs_diff += diff;
+  //     max_abs_diff = max(max_abs_diff, diff);
+  //   }
+  // }
 
-  mean_abs_diff /= float(M * N);
+  // mean_abs_diff /= float(M * N);
 
-  //  std::cout << cutlass::reference::host::TensorEquals(output_ref.host_view(), output.host_view()) << std::endl;
-  std::cout << "Max and mean abs diff: " << max_abs_diff << ", " << mean_abs_diff << "\n\n";
+  // std::cout << "Max and mean abs diff: " << max_abs_diff << ", " << mean_abs_diff << "\n\n";
 
-  benchmark("CUTLASS layer norm", [&]() {
+  auto t1 = benchmark([&]() {
       cutlass::layernorm({M, N}, output.device_ref(),
 			 input.device_ref(), gamma.device_ref(), beta.device_ref(), stream);
     });
 
-  benchmark("Simple half8 kernel", [&]() {
+  auto t2 = benchmark([&]() {
       cutlass::layernorm_half8({M, N}, output.device_ref(),
 			       input.device_ref(), gamma.device_ref(), beta.device_ref(), stream);
     });
 
-  benchmark("half kernel with smem", [&]() {
+  auto t3 = benchmark([&]() {
       cutlass::layernorm_half_smem<false>({M, N}, output.device_ref(),
 					  input.device_ref(), gamma.device_ref(), beta.device_ref(), stream);
     });
 
-  benchmark("half kernel with smem and async", [&]() {
+  auto t4 = benchmark([&]() {
       cutlass::layernorm_half_smem<true>({M, N}, output.device_ref(),
 					 input.device_ref(), gamma.device_ref(), beta.device_ref(), stream);
     });
 
+  std::cout << t1 << "," << t2 << "," << t3 << "," << t4 << std::endl;
   cudaStreamDestroy(stream);
 
   return 0;
