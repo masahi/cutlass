@@ -3,22 +3,21 @@
 #include <vector>
 #include <limits>
 
-#include "cutlass/util/device_layernorm.h"
+#include "cutlass/util/device_rms_norm.h"
 #include "cutlass/util/host_tensor.h"
 #include "cutlass/constants.h"
 #include "cutlass/util/reference/host/tensor_copy.h"
 #include "cutlass/util/reference/host/tensor_fill.h"
 #include "cutlass/util/reference/host/tensor_compare.h"
 
-#include "rms_norm.h"
 
 using ElementType = cutlass::half_t;
 using Layout = cutlass::layout::RowMajor;
 
 void rmsnorm_host(cutlass::MatrixCoord tensor_size,
-		    cutlass::TensorRef<ElementType, Layout> output,
-		    cutlass::TensorRef<ElementType, Layout> input,
-		    cutlass::TensorRef<ElementType, Layout> weight) {
+		  cutlass::TensorRef<ElementType, Layout> output,
+		  cutlass::TensorRef<ElementType, Layout> input,
+		  cutlass::TensorRef<ElementType, Layout> weight) {
   const int M = tensor_size.row();
   const int N = tensor_size.column();
 

@@ -1,6 +1,5 @@
 #pragma once
 
-#include "cutlass/arch/memory_sm80.h"
 #include "cutlass/cutlass.h"
 #include "cutlass/layout/tensor.h"
 #include "cutlass/numeric_types.h"
