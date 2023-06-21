@@ -133,6 +133,7 @@ foreach(EXAMPLE
   50_hopper_gemm_with_epilogue_swizzle
   51_hopper_gett
   layer_norm_bench
+  rms_norm
   )
 
   add_subdirectory(${EXAMPLE})
